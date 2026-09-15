@@ -43,6 +43,22 @@ export type CommentAnchor = z.infer<typeof CommentAnchorSchema>;
 export type CommentReply = z.infer<typeof CommentReplySchema>;
 export type CommentThread = z.infer<typeof CommentThreadSchema>;
 
+type CommentAccess =
+  | { mode: "host" }
+  | { mode: "guest"; guest: { id: string } };
+
+/** Host may always mutate. Guests may resolve any thread, but only edit/delete their own. */
+export function guestMayMutateComment(
+  access: CommentAccess | undefined,
+  thread: { authorId: string },
+  kind: "delete" | "edit-body" | "resolve",
+): boolean {
+  if (!access || access.mode === "host") return true;
+  if (access.mode !== "guest") return false;
+  if (kind === "resolve") return true;
+  return thread.authorId === access.guest.id;
+}
+
 const FileSchema = z.object({
   version: z.number().int().positive().default(1),
   threads: z.array(CommentThreadSchema).default([]),

@@ -157,6 +157,7 @@ const PatchSchema = z
 
 export function patchConfig(body: unknown): AppConfig {
   const patch = PatchSchema.parse(body);
+  if (Object.keys(patch).length === 0) return loadConfig();
   const existingLocal = (readJsonIfExists(LOCAL_PATH) as Record<string, unknown>) ?? {};
   const nextLocal = deepMerge(existingLocal, patch as Record<string, unknown>);
   if (patch.defaultIdentities) nextLocal.defaultIdentities = patch.defaultIdentities;

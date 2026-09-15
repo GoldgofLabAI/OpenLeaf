@@ -15,7 +15,7 @@ loadConfig(true);
 
 const { ensureProjectGit } = await import("./projectGit.js");
 const { intentionalCommit, forkBranch, loadTimeline, getBranch, ensureBranchRoot } = await import("./timeline.js");
-const { assertAiWritablePath, assertAiReadablePath, buildStarterPrompt } = await import("./aiShare.js");
+const { assertAiWritablePath, assertAiReadablePath, buildStarterPrompt, guestMayRevokeAi, mintAiCollaborator } = await import("./aiShare.js");
 
 async function git(cwd: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   try {
@@ -71,8 +71,12 @@ describe("aiShare path guards", () => {
     assert.match(p, /review-alice/);
     assert.match(p, /ai\/claude-pass1-abc/);
     assert.match(p, /Authorization: Bearer secret-token/);
+    assert.match(p, /Content-Type: application\/json/);
     assert.match(p, /Do not browse/);
     assert.match(p, /apply_patch/);
+    assert.match(p, /POST \/edit/);
+    assert.match(p, /apply_diff/);
+    assert.match(p, /from=&to=/);
   });
 });
 
@@ -120,5 +124,27 @@ describe("AI fork + commit", () => {
     const tip = await git(path.join(projectsRoot, id), ["rev-parse", `refs/heads/${forked.branch.gitRef}`]);
     assert.equal(tip.code, 0, tip.stderr);
     assert.equal(tip.stdout.trim(), result.hash);
+  });
+
+  it("refuses to mint an AI link from an AI sandbox", async () => {
+    await assert.rejects(
+      () => mintAiCollaborator(id, "ai/test-keep-main", { slug: "nested" }),
+      /human leaf/i,
+    );
+  });
+});
+
+describe("guestMayRevokeAi", () => {
+  const hostMinted = { parentBranchId: "main", mintedBy: { kind: "host" as const } };
+  const guestMinted = {
+    parentBranchId: "main",
+    mintedBy: { kind: "guest" as const, guestId: "g1", guestName: "Ada" },
+  };
+
+  it("allows a guest to revoke only their own link on their bound leaf", () => {
+    assert.equal(guestMayRevokeAi("g1", "main", guestMinted).ok, true);
+    assert.equal(guestMayRevokeAi("g2", "main", guestMinted).ok, false);
+    assert.equal(guestMayRevokeAi("g1", "other", guestMinted).ok, false);
+    assert.equal(guestMayRevokeAi("g1", "main", hostMinted).ok, false);
   });
 });

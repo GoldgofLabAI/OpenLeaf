@@ -9,10 +9,13 @@ import { attachCollabServer } from "./services/collab/server.js";
 import { ensureProjectsRoot } from "./services/projectFs.js";
 import { configRouter } from "./routes/config.js";
 import { guestRouter, joinRouter } from "./routes/guest.js";
+import { hostRouter } from "./routes/host.js";
 import { identitiesRouter } from "./routes/identities.js";
 import { projectsRouter } from "./routes/projects.js";
 import { shareRouter } from "./routes/share.js";
 import { aiApiRouter, aiBriefRouter } from "./routes/ai.js";
+import { ensureHostAuth } from "./services/hostAuth.js";
+import { startHostGateway } from "./services/hostGateway.js";
 import { hostOnly, shareGate } from "./services/shareAuth.js";
 
 function lanIp(): string | undefined {
@@ -26,6 +29,7 @@ function lanIp(): string | undefined {
 
 async function main() {
   loadConfig(true);
+  const hostCreds = ensureHostAuth();
   await ensureProjectsRoot();
 
   const app = express();
@@ -33,6 +37,20 @@ async function main() {
 
   app.use(cors());
   app.use(express.json({ limit: "20mb" }));
+  app.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      next: express.NextFunction,
+    ) => {
+      if (err instanceof SyntaxError && err instanceof Error && "body" in err) {
+        res.status(400).json({ error: "Invalid JSON" });
+        return;
+      }
+      next(err);
+    },
+  );
   // Classifies every request as host (direct) or guest (via a share tunnel)
   // and enforces guest sign-in + per-share permissions before any router.
   app.use(shareGate);
@@ -42,6 +60,7 @@ async function main() {
   });
 
   app.use("/api/guest", guestRouter);
+  app.use("/api/host", hostRouter);
   app.use("/join", joinRouter);
   app.use("/ai", aiBriefRouter);
   app.use("/api/ai", aiApiRouter);
@@ -78,6 +97,10 @@ async function main() {
       res: express.Response,
       _next: express.NextFunction,
     ) => {
+      if (err instanceof SyntaxError && err instanceof Error && "body" in err) {
+        res.status(400).json({ error: "Invalid JSON" });
+        return;
+      }
       console.error(err);
       res.status(500).json({ error: err instanceof Error ? err.message : "Server error" });
     },
@@ -96,6 +119,25 @@ async function main() {
     } else {
       console.log(`Dev UI:    http://${ip}:${cfg.client.devPort} (vite — use this during npm run dev)`);
     }
+    if (hostCreds.created && hostCreds.password) {
+      console.log(`Host login username: ${hostCreds.username}`);
+      console.log(`Host login password: ${hostCreds.password}`);
+      console.log(`(saved to config/host-credentials.txt — will not be printed again)`);
+    } else {
+      console.log(`Host login username: ${hostCreds.username} (password in config/host-credentials.txt)`);
+    }
+    void startHostGateway()
+      .then((g) => {
+        if (g.localOnly || !g.url) {
+          console.log("Public host URL: not available (install cloudflared, or set OPENLEAF_HOST_PUBLIC_HOSTNAME)");
+          return;
+        }
+        console.log(`Public host URL: ${g.url}  (sign in as ${hostCreds.username})`);
+        if (!g.dnsReady) console.log("Public DNS is still propagating — wait a few seconds before opening the link.");
+      })
+      .catch((err) => {
+        console.warn("[host-gateway] failed to start", err);
+      });
   });
 }
 

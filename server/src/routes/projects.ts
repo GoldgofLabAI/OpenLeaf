@@ -1,7 +1,7 @@
 import { Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import { compileProject } from "../services/compiler.js";
 import {
   clearCollabSnapshot,
@@ -16,6 +16,7 @@ import {
   CommentAnchorSchema,
   createComment,
   deleteComment,
+  guestMayMutateComment,
   listComments,
   patchComment,
 } from "../services/comments.js";
@@ -33,6 +34,7 @@ import {
   getProjectIdentities,
   getProjectIdentity,
   getTree,
+  isGuestForbiddenWritePath,
   listProjects,
   mkdirPath,
   pdfPathAbs,
@@ -50,18 +52,28 @@ import { streamProjectZip } from "../services/zip.js";
 import { IdentitySchema } from "../config.js";
 import type { Access } from "../services/shareAuth.js";
 import { projectShareRouter } from "./share.js";
-import { projectAiShareRouter } from "./ai.js";
+import { projectAiRouter, projectAiShareRouter } from "./ai.js";
 
 export const projectsRouter = Router();
 const filesRouter = Router({ mergeParams: true });
+projectsRouter.use("/:id/ai", projectAiRouter);
 projectsRouter.use("/:id/share/ai", projectAiShareRouter);
 projectsRouter.use("/:id/share", projectShareRouter);
 
 function statusOf(err: unknown): number {
+  if (err instanceof ZodError) return 400;
   if (err && typeof err === "object" && "status" in err && typeof (err as { status: unknown }).status === "number") {
     return (err as { status: number }).status;
   }
   return 500;
+}
+
+function rejectGuestProtectedWrite(req: { access?: Access }, rel: string, res: { status: (code: number) => { json: (body: unknown) => void } }): boolean {
+  if (req.access?.mode === "guest" && isGuestForbiddenWritePath(rel)) {
+    res.status(403).json({ error: "This path is not writable through a share link" });
+    return true;
+  }
+  return false;
 }
 
 async function authorFromRequest(
@@ -203,6 +215,7 @@ filesRouter.put(/.*/, async (req, res) => {
       res.status(400).json({ error: "Missing file path" });
       return;
     }
+    if (rejectGuestProtectedWrite(req, rel, res)) return;
     const branchId = await resolveBranchIdWithActive(req, id, { mutate: true });
     const root = await branchRoot(id, branchId);
     await writeFile(id, rel, body.content, body.encoding ?? "utf8", root);
@@ -224,6 +237,7 @@ filesRouter.delete(/.*/, async (req, res) => {
       res.status(400).json({ error: "Missing file path" });
       return;
     }
+    if (rejectGuestProtectedWrite(req, rel, res)) return;
     const branchId = await resolveBranchIdWithActive(req, id, { mutate: true });
     const root = await branchRoot(id, branchId);
     await deletePath(id, rel, root);
@@ -332,6 +346,16 @@ projectsRouter.patch("/:id/comments/:commentId", async (req, res) => {
   });
   try {
     const body = schema.parse(req.body);
+    const existing = (await listComments(req.params.id)).find((t) => t.id === req.params.commentId);
+    if (!existing) {
+      res.status(404).json({ error: "Comment not found" });
+      return;
+    }
+    const kind = body.body !== undefined ? "edit-body" : "resolve";
+    if (!guestMayMutateComment(req.access, existing, kind)) {
+      res.status(403).json({ error: "You can only edit comments you wrote" });
+      return;
+    }
     const thread = await patchComment(req.params.id, req.params.commentId, {
       resolved: body.resolved,
       body: body.body,
@@ -359,6 +383,14 @@ projectsRouter.delete("/:id/comments/:commentId", async (req, res) => {
   try {
     const threads = await listComments(req.params.id);
     const existing = threads.find((t) => t.id === req.params.commentId);
+    if (!existing) {
+      res.status(404).json({ error: "Comment not found" });
+      return;
+    }
+    if (!guestMayMutateComment(req.access, existing, "delete")) {
+      res.status(403).json({ error: "You can only delete comments you wrote" });
+      return;
+    }
     await deleteComment(req.params.id, req.params.commentId);
     notifyProjectCommentsChanged(req.params.id);
     const git = await commitAfterChange(
@@ -817,6 +849,7 @@ projectsRouter.post("/:id/fs/mkdir", async (req, res) => {
   const schema = z.object({ path: z.string().min(1) });
   try {
     const body = schema.parse(req.body);
+    if (rejectGuestProtectedWrite(req, body.path, res)) return;
     const branchId = await resolveBranchIdWithActive(req, req.params.id, { mutate: true });
     const root = await branchRoot(req.params.id, branchId);
     await mkdirPath(req.params.id, body.path, root);
@@ -835,6 +868,7 @@ projectsRouter.post("/:id/fs/create", async (req, res) => {
   });
   try {
     const body = schema.parse(req.body);
+    if (rejectGuestProtectedWrite(req, body.path, res)) return;
     const branchId = await resolveBranchIdWithActive(req, req.params.id, { mutate: true });
     const root = await branchRoot(req.params.id, branchId);
     await createEmptyFile(req.params.id, body.path, body.content ?? "", root);
@@ -853,6 +887,7 @@ projectsRouter.post("/:id/fs/rename", async (req, res) => {
   });
   try {
     const body = schema.parse(req.body);
+    if (rejectGuestProtectedWrite(req, body.from, res) || rejectGuestProtectedWrite(req, body.to, res)) return;
     const branchId = await resolveBranchIdWithActive(req, req.params.id, { mutate: true });
     const root = await branchRoot(req.params.id, branchId);
     await renamePath(req.params.id, body.from, body.to, root);

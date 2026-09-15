@@ -1,19 +1,21 @@
 import { Router } from "express";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import { getProject } from "../services/projectFs.js";
 import { getShareByHost, guestLogin, guestLogout, guestView, isExpired, verifyLinkToken } from "../services/share.js";
+import { verifyHostCookie } from "../services/hostAuth.js";
 import {
   clearCookieHeader,
   clientIp,
   cookieHeader,
-  isTunnelRequest,
   LINK_COOKIE,
   linkCookieHeader,
   parseCookies,
+  requestLane,
   resolveGuest,
 } from "../services/shareAuth.js";
 
 function statusOf(err: unknown): number {
+  if (err instanceof ZodError) return 400;
   if (err && typeof err === "object" && "status" in err && typeof (err as { status: unknown }).status === "number") {
     return (err as { status: number }).status;
   }
@@ -27,8 +29,22 @@ function statusOf(err: unknown): number {
 export const guestRouter = Router();
 
 guestRouter.get("/me", async (req, res) => {
-  if (!isTunnelRequest(req)) {
-    res.json({ mode: "host" });
+  const lane = requestLane(req);
+  if (lane.kind === "local") {
+    res.json({ mode: "host", remote: false });
+    return;
+  }
+  if (lane.kind === "host-gateway") {
+    const host = verifyHostCookie(req);
+    if (host) {
+      res.json({ mode: "host", remote: true, username: host.username });
+      return;
+    }
+    res.json({ mode: "host-login" });
+    return;
+  }
+  if (lane.kind === "ai-gateway" || lane.kind === "unknown-tunnel") {
+    res.json({ mode: "guest", active: false, reason: "no-session" });
     return;
   }
   const r = resolveGuest(req);
@@ -66,7 +82,7 @@ guestRouter.get("/me", async (req, res) => {
 });
 
 guestRouter.post("/login", (req, res) => {
-  if (!isTunnelRequest(req)) {
+  if (requestLane(req).kind !== "share") {
     res.status(400).json({ error: "Guest sign-in is only available through a share link" });
     return;
   }
@@ -117,7 +133,7 @@ guestRouter.post("/logout", (req, res) => {
 export const joinRouter = Router();
 
 joinRouter.get("/:token", (req, res) => {
-  if (!isTunnelRequest(req)) {
+  if (requestLane(req).kind !== "share") {
     res.redirect(302, "/");
     return;
   }

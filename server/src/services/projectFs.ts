@@ -77,6 +77,27 @@ export function resolveProjectPath(id: string, relativePath: string): string {
   return resolveRootPath(projectDir(id), relativePath);
 }
 
+function normalizeRelativePath(relativePath: string): string {
+  return relativePath.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+/** Host settings / runtime that guests must not rewrite through the file API. */
+export function isHostMetadataPath(relativePath: string): boolean {
+  const n = normalizeRelativePath(relativePath);
+  if (!n) return false;
+  const lower = n.toLowerCase();
+  return lower === "openleaf.json" || lower === ".openleaf" || lower.startsWith(".openleaf/");
+}
+
+/**
+ * Paths guests must not create, overwrite, rename, or delete via /files or /fs.
+ * comments.json is mutated through the comments API (with author checks) instead.
+ */
+export function isGuestForbiddenWritePath(relativePath: string): boolean {
+  if (isHostMetadataPath(relativePath)) return true;
+  return normalizeRelativePath(relativePath).toLowerCase() === "comments.json";
+}
+
 export async function ensureProjectsRoot(): Promise<void> {
   await fs.mkdir(getProjectsRootAbs(), { recursive: true });
 }
@@ -355,11 +376,13 @@ function contentTypeFor(filePath: string, asText: boolean): string {
 
 /** Do not inline file bodies larger than this into the JSON API / browser editor. */
 export const MAX_INLINE_FILE_BYTES = 1.5 * 1024 * 1024;
+/** AI tools + hunk review read this much; larger bodies are omitted. */
+export const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 
 export async function readFile(
   id: string,
   relativePath: string,
-  opts?: { forceText?: boolean; meta?: boolean; rootDir?: string },
+  opts?: { forceText?: boolean; meta?: boolean; rootDir?: string; maxBytes?: number },
 ): Promise<{
   encoding: "utf8" | "base64";
   content: string;
@@ -385,7 +408,8 @@ export async function readFile(
     }
   }
   const asText = opts?.forceText === true || isTextPath(full, sample);
-  const omitBody = opts?.meta === true || st.size > MAX_INLINE_FILE_BYTES;
+  const limit = opts?.maxBytes ?? MAX_INLINE_FILE_BYTES;
+  const omitBody = opts?.meta === true || st.size > limit;
   if (omitBody) {
     return {
       encoding: asText ? "utf8" : "base64",
@@ -393,7 +417,7 @@ export async function readFile(
       contentType: contentTypeFor(full, asText),
       size: st.size,
       text: asText,
-      contentOmitted: st.size > MAX_INLINE_FILE_BYTES,
+      contentOmitted: st.size > limit,
     };
   }
   const buf = await fs.readFile(full);

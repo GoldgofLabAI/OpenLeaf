@@ -15,6 +15,7 @@ const {
   addCommentReply,
   createComment,
   deleteComment,
+  guestMayMutateComment,
   listComments,
   patchComment,
 } = await import("./comments.js");
@@ -88,5 +89,18 @@ describe("comments threads", () => {
     await deleteComment(id, thread.id);
     const list = await listComments(id);
     assert.ok(!list.some((t) => t.id === thread.id));
+  });
+
+  it("lets guests resolve any thread but not rewrite someone else's", () => {
+    const guest = { mode: "guest" as const, guest: { id: "guest-1" } };
+    const own = { authorId: "guest-1" };
+    const other = { authorId: "admin-neo" };
+    assert.equal(guestMayMutateComment(guest, own, "delete"), true);
+    assert.equal(guestMayMutateComment(guest, own, "edit-body"), true);
+    assert.equal(guestMayMutateComment(guest, other, "delete"), false);
+    assert.equal(guestMayMutateComment(guest, other, "edit-body"), false);
+    assert.equal(guestMayMutateComment(guest, other, "resolve"), true);
+    assert.equal(guestMayMutateComment({ mode: "host" }, other, "delete"), true);
+    assert.equal(guestMayMutateComment(undefined, other, "delete"), true);
   });
 });

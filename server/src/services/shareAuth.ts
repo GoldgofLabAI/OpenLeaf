@@ -1,19 +1,30 @@
 import type { IncomingMessage } from "node:http";
 import type { NextFunction, Request, Response } from "express";
+import { isAiGatewayHost } from "./aiGateway.js";
+import { verifyHostCookie } from "./hostAuth.js";
+import { isHostGatewayHost } from "./hostGateway.js";
+import { isGuestForbiddenWritePath } from "./projectFs.js";
 import { getShareByHost, isExpired, verifyGuestToken, type Guest, type ShareSession } from "./share.js";
 
 /**
- * Splits traffic into two worlds:
- *   - host: anything that reached the server directly (localhost / LAN),
- *     i.e. the machine owner. Unchanged, full access.
- *   - guest: anything that arrived through a Cloudflare tunnel. Must present a
- *     valid session cookie for the share whose hostname it used, and is then
- *     confined to that share's project and permissions.
+ * Splits traffic into lanes:
+ *   - local: localhost / LAN. Machine owner, no login.
+ *   - host-gateway: the always-on public Cloudflare URL. Requires host login.
+ *   - share: a guest share tunnel. Guest cookie + per-share permissions.
+ *   - ai-gateway: AI collaborator tools (Bearer token on `/api/ai/`).
+ *   - unknown-tunnel: some other trycloudflare host (ended share, etc.).
  */
 
 export type Access =
-  | { mode: "host" }
+  | { mode: "host"; remote?: boolean }
   | { mode: "guest"; session: ShareSession; guest: Guest };
+
+export type RequestLane =
+  | { kind: "local" }
+  | { kind: "host-gateway" }
+  | { kind: "share" }
+  | { kind: "ai-gateway" }
+  | { kind: "unknown-tunnel" };
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -28,12 +39,33 @@ export const GUEST_COOKIE = "openleaf_share";
 /** Set by GET /join/:token; proves the guest opened the full invitation link. */
 export const LINK_COOKIE = "openleaf_link";
 
+export function hostnameOf(req: IncomingMessage): string {
+  return (req.headers.host ?? "").toLowerCase().split(":")[0] ?? "";
+}
+
+export function requestLane(req: IncomingMessage): RequestLane {
+  if (getShareByHost(req.headers.host)) return { kind: "share" };
+  if (isAiGatewayHost(req.headers.host)) return { kind: "ai-gateway" };
+  if (isHostGatewayHost(req.headers.host)) return { kind: "host-gateway" };
+  const host = hostnameOf(req);
+  if (host.endsWith(".trycloudflare.com")) return { kind: "unknown-tunnel" };
+  return { kind: "local" };
+}
+
+/** True for any public Cloudflare hostname (share, AI, host gateway, or stale). */
 export function isTunnelRequest(req: IncomingMessage): boolean {
-  const host = (req.headers.host ?? "").toLowerCase();
-  if (host.endsWith(".trycloudflare.com") || /\.trycloudflare\.com(:\d+)?$/.test(host)) return true;
-  if (typeof req.headers["cf-connecting-ip"] === "string") return true;
-  if (getShareByHost(req.headers.host)) return true;
-  return false;
+  return requestLane(req).kind !== "local";
+}
+
+function isOpenHostApi(path: string): boolean {
+  return (
+    path === "/api/health" ||
+    path.startsWith("/api/guest") ||
+    path === "/api/host/login" ||
+    path === "/api/host/logout" ||
+    path === "/api/host/me" ||
+    path === "/api/host/gateway"
+  );
 }
 
 export function clientIp(req: IncomingMessage): string {
@@ -50,7 +82,12 @@ export function parseCookies(header: string | undefined): Record<string, string>
     if (i < 0) continue;
     const k = part.slice(0, i).trim();
     const v = part.slice(i + 1).trim();
-    if (k) out[k] = decodeURIComponent(v);
+    if (!k) continue;
+    try {
+      out[k] = decodeURIComponent(v);
+    } catch {
+      out[k] = v;
+    }
   }
   return out;
 }
@@ -94,7 +131,7 @@ export function clearCookieHeader(): string {
 }
 
 /** Route-level permissions for an authenticated guest. Returns an error string or null when allowed. */
-function guestRouteDenial(req: Request, session: ShareSession): { status: number; error: string } | null {
+export function guestRouteDenial(req: Request, session: ShareSession): { status: number; error: string } | null {
   const p = req.path;
   const m = req.method.toUpperCase();
   const s = session.settings;
@@ -106,6 +143,10 @@ function guestRouteDenial(req: Request, session: ShareSession): { status: number
   const sub = p.slice(projPrefix.length); // "" or "/tree", "/files/...", ...
 
   if (sub === "") return m === "GET" ? null : { status: 403, error: "Not allowed for guests" };
+  if (sub.startsWith("/share/ai") || sub === "/ai" || sub.startsWith("/ai/")) {
+    if (s.readOnly && m !== "GET") return { status: 403, error: "This link is read-only — you cannot mint AI links" };
+    return null;
+  }
   if (sub.startsWith("/share")) return { status: 403, error: "Sharing controls are host-only" };
   if (sub.startsWith("/identities")) {
     return m === "GET" ? null : { status: 403, error: "Identities are managed by the host" };
@@ -140,24 +181,54 @@ function guestRouteDenial(req: Request, session: ShareSession): { status: number
     if (!s.allowDownload) return { status: 403, error: "Downloads are disabled for this link" };
     return null;
   }
+
+  if (m !== "GET" && guestTouchesProtectedPath(req, sub)) {
+    return { status: 403, error: "This path is not writable through a share link" };
+  }
+
   if (s.readOnly) {
     const mutating =
       m !== "GET" &&
-      (sub.startsWith("/files") || sub.startsWith("/fs/") || sub.startsWith("/collab/flush"));
+      (sub.startsWith("/files") ||
+        sub.startsWith("/fs/") ||
+        sub.startsWith("/collab/flush") ||
+        sub.startsWith("/comments"));
     if (mutating) return { status: 403, error: "This link is read-only" };
   }
   return null;
 }
 
+function guestTouchesProtectedPath(req: Request, sub: string): boolean {
+  if (sub.startsWith("/files/")) {
+    try {
+      return isGuestForbiddenWritePath(decodeURIComponent(sub.slice("/files/".length)));
+    } catch {
+      return isGuestForbiddenWritePath(sub.slice("/files/".length));
+    }
+  }
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+  if (sub === "/fs/create" || sub === "/fs/mkdir") {
+    return typeof body.path === "string" && isGuestForbiddenWritePath(body.path);
+  }
+  if (sub === "/fs/rename") {
+    return (
+      (typeof body.from === "string" && isGuestForbiddenWritePath(body.from)) ||
+      (typeof body.to === "string" && isGuestForbiddenWritePath(body.to))
+    );
+  }
+  return false;
+}
+
 /**
  * Express middleware. Runs before all routers. Static assets and the SPA
- * shell are always served (the client decides what to show); `/api/guest/*`
- * is open so guests can sign in; everything else on a tunnel host needs a
- * valid guest cookie and passes the per-share permission check.
+ * shell are always served (the client decides what to show). Local traffic is
+ * the machine owner. The host-gateway hostname needs a host cookie; share
+ * tunnels need a guest cookie.
  */
 export function shareGate(req: Request, res: Response, next: NextFunction): void {
-  if (!isTunnelRequest(req)) {
-    req.access = { mode: "host" };
+  const lane = requestLane(req);
+  if (lane.kind === "local") {
+    req.access = { mode: "host", remote: false };
     next();
     return;
   }
@@ -165,10 +236,25 @@ export function shareGate(req: Request, res: Response, next: NextFunction): void
   const isApi = req.path.startsWith("/api/");
   const isCollab = req.path.startsWith("/collab");
   if (!isApi && !isCollab) {
-    // SPA shell / assets. No access object: the client will call /api/guest/me.
     next();
     return;
   }
+
+  if (lane.kind === "host-gateway") {
+    if (isOpenHostApi(req.path)) {
+      next();
+      return;
+    }
+    const host = verifyHostCookie(req);
+    if (!host) {
+      res.status(401).json({ error: "Sign in required", code: "HOST_AUTH" });
+      return;
+    }
+    req.access = { mode: "host", remote: true };
+    next();
+    return;
+  }
+
   if (req.path.startsWith("/api/guest") || req.path === "/api/health") {
     next();
     return;
@@ -176,6 +262,11 @@ export function shareGate(req: Request, res: Response, next: NextFunction): void
   // AI collaborator tools authenticate with their own Bearer token (not the guest cookie).
   if (req.path.startsWith("/api/ai/")) {
     next();
+    return;
+  }
+
+  if (lane.kind === "ai-gateway" || lane.kind === "unknown-tunnel") {
+    res.status(404).json({ error: "This share link is no longer active" });
     return;
   }
 
