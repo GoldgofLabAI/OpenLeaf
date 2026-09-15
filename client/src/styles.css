@@ -5298,30 +5298,174 @@ a {
 .merge-compare {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
-}
-
-.merge-compare-pane {
-  min-width: 0;
-  min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.merge-compare-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid var(--line);
+}
+
+.merge-compare-pane-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0.45rem 0.75rem 0.5rem;
+}
+
+.merge-compare-pane-label span {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.merge-compare-pane-label em {
+  font-style: normal;
+  font-size: 0.8rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-compare-pane-label.is-ours {
+  background: color-mix(in srgb, #2563eb 10%, transparent);
   border-right: 1px solid var(--line);
 }
 
-.merge-compare-pane:last-child {
-  border-right: none;
+.merge-compare-pane-label.is-ours span {
+  color: color-mix(in srgb, #2563eb 80%, var(--ink-muted));
 }
 
-.merge-compare-pane header {
-  padding: 0.45rem 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 600;
+.merge-compare-pane-label.is-theirs {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.merge-compare-pane-label.is-theirs span {
+  color: color-mix(in srgb, var(--accent) 85%, var(--ink-muted));
+}
+
+.merge-diff-meta {
+  padding: 0.3rem 0.75rem;
+  font-size: 0.72rem;
   color: var(--ink-muted);
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--glass) 80%, transparent);
+  background: var(--hover-wash);
+}
+
+.merge-diff {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: 2.7rem minmax(0, 1fr) 2.7rem minmax(0, 1fr);
+  align-content: start;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.merge-diff-row {
+  display: contents;
+}
+
+.merge-diff-gutter {
+  padding: 0.05rem 0.35rem 0.05rem 0.4rem;
+  text-align: right;
+  color: var(--ink-faint);
+  font-size: 0.68rem;
+  user-select: none;
+  border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+.merge-diff-gutter.is-ours {
+  background: color-mix(in srgb, #2563eb 12%, transparent);
+  color: color-mix(in srgb, #1d4ed8 70%, var(--ink-muted));
+}
+
+.merge-diff-gutter.is-theirs {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink-muted));
+}
+
+.merge-diff-cell {
+  min-width: 0;
+  padding: 0.05rem 0.55rem;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.merge-diff-cell.is-ours {
+  border-right: 1px solid var(--line);
+}
+
+.merge-diff-row.is-eq .merge-diff-cell {
+  color: color-mix(in srgb, var(--ink) 62%, var(--ink-muted));
+}
+
+.merge-diff-cell.is-empty {
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+
+.merge-diff-cell.is-ours.is-mark {
+  background: color-mix(in srgb, #2563eb 11%, transparent);
+}
+
+.merge-diff-cell.is-theirs.is-mark {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.merge-hl {
+  border-radius: 3px;
+  box-decoration-break: clone;
+  padding: 0.04em 0.1em;
+}
+
+.merge-hl.is-ours {
+  background: color-mix(in srgb, #2563eb 32%, transparent);
+  box-shadow: inset 0 -1.5px 0 color-mix(in srgb, #2563eb 55%, transparent);
+}
+
+.merge-hl.is-theirs {
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+  box-shadow: inset 0 -1.5px 0 color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.merge-diff-gap-btn {
+  grid-column: 1 / -1;
+  border: none;
+  border-block: 1px dashed var(--line);
+  background: color-mix(in srgb, var(--hover-wash) 80%, transparent);
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  text-align: center;
+}
+
+.merge-diff-gap-btn:hover {
+  color: var(--ink);
+  background: var(--hover-wash);
+}
+
+.merge-diff-gap.is-open {
+  display: contents;
+}
+
+[data-scheme="dark"] .merge-hl.is-ours {
+  background: color-mix(in srgb, #60a5fa 28%, transparent);
+}
+
+[data-scheme="dark"] .merge-hl.is-theirs {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
 }
 
 .merge-marker-preview {

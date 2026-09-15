@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MergeCompareView } from "./MergeCompareView";
 import {
   abortProjectMerge,
   completeProjectMerge,
@@ -133,7 +134,7 @@ export function MergePanel({
         setSides(file);
         const cached = draftsRef.current.get(selectedPath);
         setDraft(cached ?? file.working ?? file.ours ?? file.theirs ?? "");
-        setTab(file.binary ? "ours" : "result");
+        setTab(file.binary ? "ours" : "compare");
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Could not load conflict file");
@@ -423,16 +424,12 @@ export function MergePanel({
                       Path: <code>{selectedPath}</code>
                     </div>
                   ) : tab === "compare" ? (
-                    <div className="merge-compare">
-                      <div className="merge-compare-pane">
-                        <header>Current · {session.targetBranchName}</header>
-                        <MarkerPreview text={sides.ours ?? "(missing)"} />
-                      </div>
-                      <div className="merge-compare-pane">
-                        <header>Incoming · {session.sourceBranchName}</header>
-                        <MarkerPreview text={sides.theirs ?? "(missing)"} />
-                      </div>
-                    </div>
+                    <MergeCompareView
+                      ours={sides.ours}
+                      theirs={sides.theirs}
+                      oursLabel={session.targetBranchName}
+                      theirsLabel={session.sourceBranchName}
+                    />
                   ) : tab === "result" ? (
                     <div className="merge-result-wrap">
                       {markersPresent && (
