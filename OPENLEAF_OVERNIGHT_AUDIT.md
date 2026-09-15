@@ -432,7 +432,7 @@ On `audit/overnight-quality-pass` (do **not** merge to `main`):
 | `81f19dd` | Extract session fallback and timeline Escape helpers |
 | `a05afec` | Return 400 for invalid JSON and 404 for missing projects |
 | `6c6e6c9` | Gate editor load and keep timeline chrome below the toolbar |
-| (this file) | Continuation report: 94 tests, 44 playtest checks, hashes above |
+| `ad55085` | Record continuation audit evidence and commit hashes |
 
 **Not audit-authored:** `8da7c16` contains host-gateway / AI-review / editor modules that predated the overnight pass and were committed only so this branch typechecks.
 
