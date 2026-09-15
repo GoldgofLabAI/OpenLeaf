@@ -118,6 +118,9 @@ export async function readProjectConfig(id: string): Promise<PaperflowProjectCon
 }
 
 export async function getProjectIdentities(id: string): Promise<Identity[]> {
+  if (!fsSync.existsSync(projectDir(id))) {
+    throw Object.assign(new Error("Project not found"), { status: 404 });
+  }
   const cfg = await readProjectConfig(id);
   if (cfg.identities && cfg.identities.length > 0) {
     // Soft-validate; skip malformed entries rather than failing the project open

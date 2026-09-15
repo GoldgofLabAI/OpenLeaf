@@ -96,8 +96,11 @@ export async function readCommitText(
 
 /** Ensure the project is a git repo with a sensible .gitignore. */
 export async function ensureProjectGit(id: string): Promise<void> {
-  if (!isGitEnabled()) return;
   const root = projectDir(id);
+  if (!fsSync.existsSync(root)) {
+    throw Object.assign(new Error("Project not found"), { status: 404 });
+  }
+  if (!isGitEnabled()) return;
   const gitDir = path.join(root, ".git");
   if (!fsSync.existsSync(gitDir)) {
     // Prefer `main` (portable across Git < 2.28 that lack `git init -b`).

@@ -12,7 +12,7 @@ process.env.OPENLEAF_PROJECTS_ROOT = projectsRoot;
 
 const { loadConfig } = await import("../config.js");
 loadConfig(true);
-const { autoCommitProject } = await import("./projectGit.js");
+const { autoCommitProject, ensureProjectGit } = await import("./projectGit.js");
 
 async function git(id: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd: path.join(projectsRoot, id) });
@@ -85,5 +85,20 @@ describe("autoCommitProject path-scoped comments", () => {
       .filter(Boolean)
       .sort();
     assert.deepEqual(files, ["extra.tex", "main.tex"]);
+  });
+});
+
+describe("ensureProjectGit", () => {
+  it("404s instead of initializing git in a missing project folder", async () => {
+    await assert.rejects(
+      () => ensureProjectGit("does-not-exist-audit"),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal((err as { status?: number }).status, 404);
+        assert.match(err.message, /Project not found/);
+        return true;
+      },
+    );
+    assert.equal(fs.existsSync(path.join(projectsRoot, "does-not-exist-audit")), false);
   });
 });

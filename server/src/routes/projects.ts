@@ -51,6 +51,7 @@ import { forwardSynctex, reverseSynctex } from "../services/synctex.js";
 import { streamProjectZip } from "../services/zip.js";
 import { IdentitySchema } from "../config.js";
 import type { Access } from "../services/shareAuth.js";
+import { publicErrorMessage } from "../http/jsonErrors.js";
 import { projectShareRouter } from "./share.js";
 import { projectAiRouter, projectAiShareRouter } from "./ai.js";
 
@@ -135,7 +136,7 @@ projectsRouter.get("/", async (_req, res) => {
   try {
     res.json(await listProjects());
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -149,7 +150,7 @@ projectsRouter.post("/", async (req, res) => {
     const project = await createProject(body.id, body.fromTemplate ?? "example-article");
     res.status(201).json(project);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -157,7 +158,7 @@ projectsRouter.get("/:id", async (req, res) => {
   try {
     res.json(await getProject(req.params.id));
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -173,7 +174,7 @@ projectsRouter.get("/:id/tree", async (req, res) => {
     const root = await branchRoot(req.params.id, branchId);
     res.json(await getTree(req.params.id, root));
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -198,7 +199,7 @@ filesRouter.get(/.*/, async (req, res) => {
     const file = await readFile(id, rel, { forceText, rootDir: root });
     res.json({ path: rel, ...file });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -225,7 +226,7 @@ filesRouter.put(/.*/, async (req, res) => {
     const git = await commitAfterChange(id, `Save ${rel}`, req);
     res.json({ ok: true, path: rel, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -245,7 +246,7 @@ filesRouter.delete(/.*/, async (req, res) => {
     const git = await commitAfterChange(id, `Delete ${rel}`, req);
     res.json({ ok: true, path: rel, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -255,7 +256,7 @@ projectsRouter.get("/:id/identities", async (req, res) => {
   try {
     res.json(await getProjectIdentities(req.params.id));
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -273,7 +274,7 @@ projectsRouter.put("/:id/identities", async (req, res) => {
     const cfg = await writeProjectConfig(req.params.id, { identities });
     res.json(cfg.identities ?? identities);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -281,7 +282,7 @@ projectsRouter.get("/:id/comments", async (req, res) => {
   try {
     res.json(await listComments(req.params.id));
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -309,7 +310,7 @@ projectsRouter.post("/:id/comments", async (req, res) => {
     );
     res.status(201).json({ thread, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -334,7 +335,7 @@ projectsRouter.post("/:id/comments/:commentId/replies", async (req, res) => {
     );
     res.status(201).json({ thread, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -375,7 +376,7 @@ projectsRouter.patch("/:id/comments/:commentId", async (req, res) => {
     );
     res.json({ thread, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -403,7 +404,7 @@ projectsRouter.delete("/:id/comments/:commentId", async (req, res) => {
     );
     res.json({ ok: true, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -429,7 +430,7 @@ projectsRouter.post("/:id/collab/flush", async (req, res) => {
     });
     res.json({ ok: true, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -445,7 +446,7 @@ projectsRouter.post("/:id/collab/ensure", async (req, res) => {
     await room.ensureFile(body.path);
     res.json({ ok: true, path: body.path });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -457,7 +458,7 @@ projectsRouter.get("/:id/diff-highlights", async (req, res) => {
     const result = await computeDiffHighlights(req.params.id, since, branchId, at);
     res.json(result);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -465,7 +466,7 @@ projectsRouter.get("/:id/branch-leaves", async (req, res) => {
   try {
     res.json(await listBranchLeafStats(req.params.id));
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 projectsRouter.get("/:id/history", async (req, res) => {
@@ -474,7 +475,7 @@ projectsRouter.get("/:id/history", async (req, res) => {
     const commits = await listProjectCommits(req.params.id, Number.isFinite(limit) ? limit : 50);
     res.json(commits);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -498,7 +499,7 @@ projectsRouter.post("/:id/history/restore", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" });
     res.json({ ok: true });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -514,7 +515,7 @@ projectsRouter.get("/:id/timeline", async (req, res) => {
     const view = await getTimelineView(req.params.id, branchId ? { branchId } : undefined);
     res.json(view);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -551,7 +552,7 @@ projectsRouter.post("/:id/timeline/commit", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" }, branchId);
     res.json(result);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -572,7 +573,7 @@ projectsRouter.post("/:id/timeline/fork", async (req, res) => {
     const result = await forkBranch(req.params.id, body);
     res.status(201).json(result);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -600,7 +601,7 @@ projectsRouter.post("/:id/timeline/prune", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" });
     res.json({ ok: true, timeline });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -613,7 +614,7 @@ projectsRouter.get("/:id/timeline/trash", async (req, res) => {
     const { listPrunedTips } = await import("../services/timeline.js");
     res.json({ items: await listPrunedTips(req.params.id) });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -632,7 +633,7 @@ projectsRouter.post("/:id/timeline/unprune", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" }, timeline.activeBranchId);
     res.json({ ok: true, timeline });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -671,7 +672,7 @@ projectsRouter.post("/:id/timeline/trash/delete", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" });
     res.json(result);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -704,7 +705,7 @@ projectsRouter.post("/:id/timeline/checkout", async (req, res) => {
     }
     res.json(view);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -741,7 +742,7 @@ projectsRouter.post("/:id/timeline/merge/start", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" }, targetBranchId);
     res.status(201).json(session);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -759,7 +760,7 @@ projectsRouter.get("/:id/timeline/merge", async (req, res) => {
     }
     res.json(session);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -777,7 +778,7 @@ projectsRouter.get("/:id/timeline/merge/file", async (req, res) => {
     const { getMergeConflictFile } = await import("../services/branchMerge.js");
     res.json(await getMergeConflictFile(req.params.id, filePath));
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -800,7 +801,7 @@ projectsRouter.post("/:id/timeline/merge/resolve", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" }, session.targetBranchId);
     res.json(session);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -824,7 +825,7 @@ projectsRouter.post("/:id/timeline/merge/complete", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" }, result.session.targetBranchId);
     res.json(result);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -841,7 +842,7 @@ projectsRouter.post("/:id/timeline/merge/abort", async (req, res) => {
     notifyProjectTreeChange(req.params.id, { op: "bump" }, result.targetBranchId);
     res.json(result);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -857,7 +858,7 @@ projectsRouter.post("/:id/fs/mkdir", async (req, res) => {
     const git = await commitAfterChange(req.params.id, `mkdir ${body.path}`, req);
     res.status(201).json({ ok: true, path: body.path, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -876,7 +877,7 @@ projectsRouter.post("/:id/fs/create", async (req, res) => {
     const git = await commitAfterChange(req.params.id, `Create ${body.path}`, req);
     res.status(201).json({ ok: true, path: body.path, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -895,7 +896,7 @@ projectsRouter.post("/:id/fs/rename", async (req, res) => {
     const git = await commitAfterChange(req.params.id, `Rename ${body.from} → ${body.to}`, req);
     res.json({ ok: true, from: body.from, to: body.to, git });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -938,7 +939,7 @@ data: ${JSON.stringify(data)}
     const result = await compileProject(id, undefined, { branchId });
     res.status(result.ok ? 200 : 422).json(result);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -956,7 +957,7 @@ projectsRouter.get("/:id/pdf", async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     fs.createReadStream(pdf).pipe(res);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -994,7 +995,7 @@ projectsRouter.get("/:id/synctex", async (req, res) => {
     }
     res.json(hit);
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });
 
@@ -1024,6 +1025,6 @@ projectsRouter.get("/:id/download", async (req, res) => {
     }
     res.status(400).json({ error: "format must be pdf or zip" });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
 });

@@ -8,6 +8,7 @@ import {
 } from "../services/hostAuth.js";
 import { hostGatewayPublicView } from "../services/hostGateway.js";
 import { clientIp } from "../services/shareAuth.js";
+import { publicErrorMessage } from "../http/jsonErrors.js";
 
 function statusOf(err: unknown): number {
   if (err instanceof ZodError) return 400;
@@ -43,7 +44,7 @@ hostRouter.post("/login", (req, res) => {
     res.setHeader("Set-Cookie", hostCookieHeader(token));
     res.json({ ok: true, username });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Sign-in failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err, "Sign-in failed") });
   }
 });
 

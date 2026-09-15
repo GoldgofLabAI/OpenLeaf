@@ -179,6 +179,10 @@ async function migrateFromGit(projectId: string, state: TimelineState): Promise<
 }
 
 export async function loadTimeline(projectId: string): Promise<TimelineState> {
+  const dir = projectDir(projectId);
+  if (!fsSync.existsSync(dir)) {
+    throw err(404, "Project not found");
+  }
   await ensureProjectGit(projectId);
   const dest = timelinePath(projectId);
   let state: TimelineState;

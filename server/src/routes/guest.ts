@@ -3,6 +3,7 @@ import { z, ZodError } from "zod";
 import { getProject } from "../services/projectFs.js";
 import { getShareByHost, guestLogin, guestLogout, guestView, isExpired, verifyLinkToken } from "../services/share.js";
 import { verifyHostCookie } from "../services/hostAuth.js";
+import { publicErrorMessage } from "../http/jsonErrors.js";
 import {
   clearCookieHeader,
   clientIp,
@@ -114,7 +115,7 @@ guestRouter.post("/login", (req, res) => {
       share: guestView(r.session),
     });
   } catch (err) {
-    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Sign-in failed" });
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err, "Sign-in failed") });
   }
 });
 

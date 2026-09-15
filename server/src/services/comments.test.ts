@@ -10,7 +10,7 @@ process.env.OPENLEAF_PROJECTS_ROOT = projectsRoot;
 const { loadConfig } = await import("../config.js");
 loadConfig(true);
 
-const { createProject } = await import("./projectFs.js");
+const { createProject, getProjectIdentities } = await import("./projectFs.js");
 const {
   addCommentReply,
   createComment,
@@ -102,5 +102,19 @@ describe("comments threads", () => {
     assert.equal(guestMayMutateComment(guest, other, "resolve"), true);
     assert.equal(guestMayMutateComment({ mode: "host" }, other, "delete"), true);
     assert.equal(guestMayMutateComment(undefined, other, "delete"), true);
+  });
+});
+
+describe("getProjectIdentities", () => {
+  it("404s when the project folder does not exist", async () => {
+    await assert.rejects(
+      () => getProjectIdentities("no-such-project-audit"),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal((err as { status?: number }).status, 404);
+        assert.match(err.message, /Project not found/);
+        return true;
+      },
+    );
   });
 });

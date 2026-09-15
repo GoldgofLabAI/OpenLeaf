@@ -17,6 +17,7 @@ import { aiApiRouter, aiBriefRouter } from "./routes/ai.js";
 import { ensureHostAuth } from "./services/hostAuth.js";
 import { startHostGateway } from "./services/hostGateway.js";
 import { hostOnly, shareGate } from "./services/shareAuth.js";
+import { invalidJsonMiddleware, isInvalidJsonBodyError } from "./http/jsonErrors.js";
 
 function lanIp(): string | undefined {
   for (const nets of Object.values(os.networkInterfaces())) {
@@ -37,20 +38,7 @@ async function main() {
 
   app.use(cors());
   app.use(express.json({ limit: "20mb" }));
-  app.use(
-    (
-      err: unknown,
-      _req: express.Request,
-      res: express.Response,
-      next: express.NextFunction,
-    ) => {
-      if (err instanceof SyntaxError && err instanceof Error && "body" in err) {
-        res.status(400).json({ error: "Invalid JSON" });
-        return;
-      }
-      next(err);
-    },
-  );
+  app.use(invalidJsonMiddleware);
   // Classifies every request as host (direct) or guest (via a share tunnel)
   // and enforces guest sign-in + per-share permissions before any router.
   app.use(shareGate);
@@ -97,7 +85,7 @@ async function main() {
       res: express.Response,
       _next: express.NextFunction,
     ) => {
-      if (err instanceof SyntaxError && err instanceof Error && "body" in err) {
+      if (isInvalidJsonBodyError(err)) {
         res.status(400).json({ error: "Invalid JSON" });
         return;
       }
