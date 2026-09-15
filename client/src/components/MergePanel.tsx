@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   abortProjectMerge,
   completeProjectMerge,
@@ -80,6 +80,7 @@ export function MergePanel({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const draftsRef = useRef<Map<string, string>>(new Map());
 
   const applySession = useCallback(
     (next: MergeSession | null) => {
@@ -130,7 +131,8 @@ export function MergePanel({
         const file = await getProjectMergeFile(projectId, selectedPath);
         if (cancelled) return;
         setSides(file);
-        setDraft(file.working ?? file.ours ?? file.theirs ?? "");
+        const cached = draftsRef.current.get(selectedPath);
+        setDraft(cached ?? file.working ?? file.ours ?? file.theirs ?? "");
         setTab(file.binary ? "ours" : "result");
       } catch (err) {
         if (!cancelled) {
@@ -183,6 +185,7 @@ export function MergePanel({
         strategy,
         content: strategy === "manual" ? draft : undefined,
       });
+      draftsRef.current.delete(selectedPath);
       applySession(next);
       const nextOpen = next.conflicts.find((c) => !c.resolved)?.path ?? selectedPath;
       setSelectedPath(nextOpen);
@@ -206,6 +209,7 @@ export function MergePanel({
         message: message.trim() || undefined,
       });
       applySession(null);
+      draftsRef.current.clear();
       onFinished(result.timeline);
       onClose();
     } catch (err) {
@@ -224,6 +228,7 @@ export function MergePanel({
     try {
       const result = await abortProjectMerge(projectId);
       applySession(null);
+      draftsRef.current.clear();
       onFinished(result.timeline);
       onClose();
     } catch (err) {
@@ -438,7 +443,11 @@ export function MergePanel({
                       <textarea
                         className="merge-textarea"
                         value={draft}
-                        onChange={(e) => setDraft(e.target.value)}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setDraft(v);
+                          if (selectedPath) draftsRef.current.set(selectedPath, v);
+                        }}
                         spellCheck={false}
                         disabled={busy}
                       />

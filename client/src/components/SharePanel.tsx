@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { checkoutProjectTimeline, forkProjectTimeline, getProjectTimeline } from "../api/client";
+import { forkProjectTimeline } from "../api/client";
 import type { TimelineView } from "../api/types";
 import {
   getProjectShare,
-  mintAiCollaborator,
-  revokeAiCollaborator,
   revokeShareGuest,
   startProjectShare,
   stopProjectShare,
@@ -13,9 +11,11 @@ import {
   type UpdateShareInput,
 } from "../api/share";
 import { ShareBranchPicker, type ShareBranchChoice } from "./ShareBranchPicker";
+import { copyText } from "../lib/clipboard";
 
 export type ShareLiveInfo = {
   active: boolean;
+  count: number;
   /** null = indefinite; undefined = no live session. */
   expiresAt: number | null | undefined;
 };
@@ -189,7 +189,8 @@ function CopyButton({
       className={primary ? "btn btn-primary share-copy-primary" : "btn btn-ghost share-copy"}
       title={`Copy ${label}`}
       onClick={() => {
-        void navigator.clipboard.writeText(value).then(() => {
+        void copyText(value).then((ok) => {
+          if (!ok) return;
           setDone(true);
           window.setTimeout(() => setDone(false), 1400);
         });
@@ -208,7 +209,8 @@ export function SharePanel({
   onTimelineChange,
 }: Props) {
   const [session, setSession] = useState<ShareSessionView | null>(null);
-  const [, setSessions] = useState<ShareSessionView[]>([]);
+  const [sessions, setSessions] = useState<ShareSessionView[]>([]);
+  const [creating, setCreating] = useState(false);
   const [branchChoice, setBranchChoice] = useState<ShareBranchChoice | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -229,14 +231,11 @@ export function SharePanel({
   const [adjusting, setAdjusting] = useState(false);
   const [showExtendPicker, setShowExtendPicker] = useState(false);
   const [extendTo, setExtendTo] = useState(() => toLocalInputValue(Date.now() + 24 * 3600_000));
-  const [aiSlug, setAiSlug] = useState("chatgpt-pass1");
-  const [aiTtlMinutes, setAiTtlMinutes] = useState<number | "">("");
-  const [lastAiPrompt, setLastAiPrompt] = useState<string | null>(null);
-  const [lastAiUrl, setLastAiUrl] = useState<string | null>(null);
-  const [lastAiId, setLastAiId] = useState<string | null>(null);
 
   const onActiveChangeRef = useRef(onActiveChange);
   onActiveChangeRef.current = onActiveChange;
+  const sessionIdRef = useRef<string | null>(null);
+  sessionIdRef.current = session?.id ?? null;
 
   const refresh = useCallback(async () => {
     try {
@@ -247,10 +246,12 @@ export function SharePanel({
         branchChoice?.mode === "continue"
           ? list.find((x) => x.branchId === branchChoice.branchId)
           : undefined;
-      const s = preferred ?? list[0] ?? null;
+      const s = preferred ?? list.find((x) => x.id === sessionIdRef.current) ?? list[0] ?? null;
       setSession(s);
+      if (list.length === 0) setCreating(true);
       onActiveChangeRef.current?.({
         active: list.length > 0,
+        count: list.length,
         expiresAt: s ? s.settings.expiresAt : list[0]?.settings.expiresAt,
       });
     } catch (err) {
@@ -263,6 +264,7 @@ export function SharePanel({
     setLoading(true);
     // Fresh create form: never pre-select a branch (including main).
     setBranchChoice(null);
+    setCreating(false);
     void refresh().finally(() => setLoading(false));
   }, [open, projectId]); // eslint-disable-line react-hooks/exhaustive-deps -- reset only when opening
 
@@ -344,9 +346,15 @@ export function SharePanel({
         allowDownload,
         allowHistory,
       });
+      const list = r.sessions ?? (r.session ? [r.session] : []);
       setSession(r.session ?? null);
-      setSessions(r.sessions ?? (r.session ? [r.session] : []));
-      onActiveChange?.({ active: Boolean(r.session), expiresAt: r.session?.settings.expiresAt });
+      setSessions(list);
+      setCreating(false);
+      onActiveChange?.({
+        active: list.length > 0,
+        count: list.length,
+        expiresAt: r.session?.settings.expiresAt,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start share");
     } finally {
@@ -355,14 +363,12 @@ export function SharePanel({
   };
 
   const onStop = async () => {
-    if (!window.confirm("End this share session? The link and credentials stop working immediately for everyone.")) return;
+    if (!window.confirm("End this user share? The link and credentials stop working immediately for everyone on this leaf. AI links and other user links stay up.")) return;
     setBusy(true);
     setError(null);
     try {
       await stopProjectShare(projectId, session?.branchId);
-      setSession(null);
       await refresh();
-      onActiveChange?.({ active: false, expiresAt: undefined });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not stop share");
     } finally {
@@ -375,9 +381,14 @@ export function SharePanel({
     setError(null);
     try {
       const r = await updateProjectShare(projectId, { ...patch, branchId: session?.branchId });
+      const list = r.sessions ?? (r.session ? [r.session] : []);
       setSession(r.session ?? null);
-      setSessions(r.sessions ?? (r.session ? [r.session] : []));
-      onActiveChange?.({ active: Boolean(r.session), expiresAt: r.session?.settings.expiresAt });
+      setSessions(list);
+      onActiveChange?.({
+        active: list.length > 0,
+        count: list.length,
+        expiresAt: r.session?.settings.expiresAt,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update share");
     } finally {
@@ -395,62 +406,11 @@ export function SharePanel({
     }
   };
 
-  const onMintAi = async () => {
-    if (!session) return;
-    const slug = aiSlug.trim();
-    if (!slug) {
-      setError("Pick a short slug for the AI sandbox (e.g. chatgpt-pass1)");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await mintAiCollaborator(projectId, {
-        branchId: session.branchId,
-        slug,
-        ttlMinutes: aiTtlMinutes === "" ? null : Number(aiTtlMinutes),
-      });
-      setSession(r.session);
-      setSessions(r.sessions);
-      setLastAiPrompt(r.starterPrompt);
-      setLastAiUrl(r.aiUrl);
-      setLastAiId(r.ai.id);
-      try {
-        onTimelineChange?.(await getProjectTimeline(projectId));
-      } catch {
-        /* timeline refresh optional */
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not mint AI collaborator");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const onRevokeAi = async (aiId: string, branchName: string) => {
-    if (!session) return;
-    if (!window.confirm(`Revoke AI link for “${branchName}”? The token stops working; the fork stays on the timeline.`)) {
-      return;
-    }
-    try {
-      const r = await revokeAiCollaborator(projectId, aiId, session.branchId);
-      setSession(r.session ?? null);
-      setSessions(r.sessions);
-      if (lastAiId === aiId) {
-        setLastAiPrompt(null);
-        setLastAiUrl(null);
-        setLastAiId(null);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not revoke AI link");
-    }
-  };
-
   if (!open) return null;
 
   const liveGuests = session ? session.guests.filter((g) => !g.revoked) : [];
-  const liveAi = session ? (session.aiCollaborators ?? []).filter((a) => !a.revoked) : [];
-  const inviteText = session ? buildInvitation(session) : "";
+  const showCreate = creating || !session;
+  const inviteText = session && !showCreate ? buildInvitation(session) : "";
   const indefinite = Boolean(session && session.settings.expiresAt === null);
   const remaining = session && session.settings.expiresAt !== null ? session.settings.expiresAt - now : 0;
   const elapsedPct =
@@ -461,7 +421,7 @@ export function SharePanel({
   return (
     <aside className="history-drawer share-drawer" aria-label="Share project">
       <div className="history-drawer-head">
-        <strong>Share “{projectId}”</strong>
+        <strong>User links</strong>
         <div className="history-drawer-actions">
           <button type="button" className="btn btn-ghost btn-icon" onClick={onClose} title="Close" aria-label="Close">
             ✕
@@ -478,14 +438,45 @@ export function SharePanel({
         </div>
       )}
 
-      {loading && !session ? (
+      {loading && !session && sessions.length === 0 ? (
         <p className="history-hint">Loading…</p>
-      ) : session ? (
+      ) : (
+        <>
+          {sessions.length > 0 && (
+            <div className="share-session-tabs" role="tablist" aria-label="Live user links">
+              {sessions.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={!showCreate && session?.id === s.id}
+                  className={`share-session-tab${!showCreate && session?.id === s.id ? " is-active" : ""}`}
+                  onClick={() => {
+                    setSession(s);
+                    setCreating(false);
+                  }}
+                >
+                  {s.branchName}
+                </button>
+              ))}
+              <button
+                type="button"
+                className={`share-session-tab share-session-tab-new${showCreate ? " is-active" : ""}`}
+                onClick={() => {
+                  setCreating(true);
+                  setBranchChoice(null);
+                }}
+              >
+                + New user link
+              </button>
+            </div>
+          )}
+      {!showCreate && session ? (
         <div className="share-body">
           <p className="history-hint">
-            Live public link for branch <strong>{session.branchName}</strong> through a Cloudflare tunnel. Only this
-            project is reachable. Ending the session kills the link and all guest sign-ins; the next session gets a new
-            link and new credentials. Other branches may have their own links at the same time.
+            Live user share for leaf <strong>{session.branchName}</strong> through a Cloudflare tunnel. Only this
+            project is reachable. One user link per leaf — other leaves can have their own at the same time. AI
+            collaborators are minted separately (AI links) and keep working if you end this user share.
           </p>
 
           {!session.dnsReady && (
@@ -697,114 +688,6 @@ export function SharePanel({
             </>
           )}
 
-          <details className="share-ai-section" open={liveAi.length > 0 || Boolean(lastAiPrompt)}>
-            <summary className="share-section-title share-ai-summary">
-              AI collaborators
-              <span className="share-muted">eager fork · never writes this share tip</span>
-            </summary>
-            <p className="share-muted share-pad">
-              Mints <code>ai/&lt;slug&gt;-…</code> from the <strong>committed tip</strong> of{" "}
-              <strong>{session.branchName}</strong> (uncommitted WIP is not included — commit first if the AI should see
-              it). Copy the <strong>self-contained prompt</strong> into ChatGPT/Claude — do not rely on the model fetching
-              the Cloudflare URL (often blocked). Review on the timeline; no auto-merge. AI tokens die when you revoke
-              them, end this share, or restart the server.
-            </p>
-            {!session.dnsReady && (
-              <p className="share-warn share-pad">
-                Public DNS is not ready yet — you can mint an AI link, but wait for DNS before pasting the URL into an
-                external model.
-              </p>
-            )}
-            <div className="share-form share-ai-mint">
-              <div className="share-field">
-                <span className="share-field-label">Slug</span>
-                <div className="share-inline">
-                  <input
-                    value={aiSlug}
-                    onChange={(e) => setAiSlug(e.target.value)}
-                    placeholder="chatgpt-pass1"
-                    disabled={busy}
-                  />
-                  <input
-                    type="number"
-                    min={1}
-                    placeholder="TTL min (opt)"
-                    value={aiTtlMinutes}
-                    onChange={(e) => setAiTtlMinutes(e.target.value === "" ? "" : Number(e.target.value))}
-                    disabled={busy}
-                    style={{ maxWidth: "7.5rem" }}
-                  />
-                  <button type="button" className="btn btn-primary" disabled={busy || !session.url} onClick={() => void onMintAi()}>
-                    {busy ? "Forking…" : "Add AI collaborator"}
-                  </button>
-                </div>
-              </div>
-            </div>
-            {lastAiPrompt && lastAiUrl && (
-              <div className="share-ai-fresh">
-                <div className="share-cred">
-                  <span className="share-cred-label">AI URL</span>
-                  <code className="share-cred-value share-url" title={lastAiUrl}>
-                    {lastAiUrl}
-                  </code>
-                  <CopyButton value={lastAiUrl} label="AI URL" />
-                </div>
-                <div className="share-cred">
-                  <span className="share-cred-label">Starter prompt</span>
-                  <CopyButton value={lastAiPrompt} label="self-contained prompt" primary>
-                    Copy ChatGPT prompt
-                  </CopyButton>
-                </div>
-                <pre className="share-ai-prompt">{lastAiPrompt}</pre>
-              </div>
-            )}
-            {liveAi.length === 0 ? (
-              <p className="share-muted share-pad">No AI sandboxes yet.</p>
-            ) : (
-              <ul className="share-guests share-ai-list">
-                {liveAi.map((a) => (
-                  <li key={a.id}>
-                    <span className="tl-chip ai">AI</span>
-                    <code title={a.branchName}>{a.branchName}</code>
-                    <span className="share-muted">
-                      from {a.parentBranchName} · {a.writeCount} writes · {a.compileCount} compiles
-                      {a.expiresAt ? ` · AI TTL ${formatWhen(a.expiresAt)}` : ""}
-                    </span>
-                    {a.aiUrl && <CopyButton value={a.aiUrl} label="AI URL" />}
-                    {a.starterPrompt && (
-                      <CopyButton value={a.starterPrompt} label="ChatGPT prompt">
-                        Copy ChatGPT prompt
-                      </CopyButton>
-                    )}
-                    <button
-                      type="button"
-                      className="btn btn-ghost share-copy"
-                      onClick={() => {
-                        void (async () => {
-                          try {
-                            const view = await checkoutProjectTimeline(projectId, { branchId: a.branchId, nodeId: null });
-                            onTimelineChange?.(view);
-                          } catch (err) {
-                            setError(err instanceof Error ? err.message : "Could not open AI branch");
-                          }
-                        })();
-                      }}
-                    >
-                      Review on timeline
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost share-copy"
-                      onClick={() => void onRevokeAi(a.id, a.branchName)}
-                    >
-                      Revoke
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </details>
-
           <div className="share-section-title">
             Signed-in guests
             <span className="share-muted">
@@ -854,17 +737,22 @@ export function SharePanel({
 
           <div className="share-footer">
             <button type="button" className="btn btn-danger" onClick={() => void onStop()} disabled={busy}>
-              {busy ? "Ending…" : "End session"}
+              {busy ? "Ending…" : "End this user link"}
             </button>
           </div>
         </div>
       ) : (
         <div className="share-body">
           <p className="history-hint">
-            Create a temporary public link for this project. It opens a Cloudflare tunnel from this machine, generates
-            a one-off username and password, and only exposes this project. Guests must sign in with the credentials
-            and give a display name that appears on their cursor.
+            Create a temporary public user link for this project. Guests sign in with one-off credentials. One user
+            link per leaf —             mint extra links for other leaves while this one stays live. AI collaborators are separate
+            (use <strong>AI links</strong>); they do not need a user share.
           </p>
+          {sessions.length > 0 && (
+            <p className="share-muted share-pad">
+              Already live: {sessions.map((s) => s.branchName).join(", ")}. Pick a different leaf (or fork one).
+            </p>
+          )}
 
           <div className="share-form">
             <div className="share-field">
@@ -876,8 +764,9 @@ export function SharePanel({
                 disabled={busy}
               />
               <span className="share-muted">
-                Empty until you pick a leaf. Guests only edit/commit that branch’s tip. One active link per branch;
-                fork at share-time to desync from an existing leaf.
+                Empty until you pick a leaf. Guests only edit/commit that branch’s tip. One user link per leaf; a leaf
+                that already has a user link is rejected. Fork at share-time to desync from an existing leaf. AI
+                sandboxes are minted from <strong>AI links</strong>, not here.
               </span>
             </div>
             <div className="share-field">
@@ -909,7 +798,7 @@ export function SharePanel({
               </div>
               <span className="share-muted">
                 {ttlMode === "indefinite"
-                  ? "Runs until you click End session"
+                  ? "Runs until you click End this user link"
                   : Number.isFinite(expiresAtInput)
                     ? `Ends ${formatWhen(expiresAtInput as number)}`
                     : "Pick a valid date"}
@@ -1013,10 +902,12 @@ export function SharePanel({
             </button>
           </div>
           <p className="share-muted share-pad">
-            Requires <code>cloudflared</code> on this machine. The link lives only while OpenLeaf runs here and this
-            session is active.
+            Requires <code>cloudflared</code> on this machine. The user link lives only while OpenLeaf runs here and
+            this session is active. AI links use their own tunnel and are not tied to this share.
           </p>
         </div>
+      )}
+        </>
       )}
     </aside>
   );

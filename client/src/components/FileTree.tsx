@@ -34,6 +34,17 @@ function parentOf(p: string): string {
   return i >= 0 ? p.slice(0, i) : "";
 }
 
+/** Directory paths that contain `filePath` (not including the file itself). */
+function ancestorsOf(filePath: string | null): string[] {
+  if (!filePath) return [];
+  const parts = filePath.split("/").filter(Boolean);
+  const dirs: string[] = [];
+  for (let i = 1; i < parts.length; i += 1) {
+    dirs.push(parts.slice(0, i).join("/"));
+  }
+  return dirs;
+}
+
 /** Reject drops into itself/descendant or into the directory it is already in. */
 function isNoopOrCyclicDrop(from: string, toDir: string): boolean {
   if (toDir === from || toDir.startsWith(`${from}/`)) return true;
@@ -60,8 +71,10 @@ function NodeView({
   node,
   activePath,
   dragOverDir,
+  expanded,
   fileChanges,
   onOpen,
+  onToggleDir,
   onContextMenu,
   onDragStartNode,
   onDirDragOver,
@@ -71,8 +84,10 @@ function NodeView({
   node: TreeNode;
   activePath: string | null;
   dragOverDir: string | null;
+  expanded: ReadonlySet<string>;
   fileChanges?: Record<string, FileChangeHint> | null;
   onOpen: (path: string) => void;
+  onToggleDir: (path: string, open: boolean) => void;
   onContextMenu: (e: React.MouseEvent, node: TreeNode) => void;
   onDragStartNode: (e: React.DragEvent, node: TreeNode) => void;
   onDirDragOver: (e: React.DragEvent, dir: string) => void;
@@ -81,7 +96,15 @@ function NodeView({
 }) {
   if (node.type === "directory") {
     return (
-      <details className="tree-dir" open>
+      <details
+        className="tree-dir"
+        open={expanded.has(node.path)}
+        onToggle={(e) => {
+          e.stopPropagation();
+          const want = e.currentTarget.open;
+          if (want !== expanded.has(node.path)) onToggleDir(node.path, want);
+        }}
+      >
         <summary
           className={dragOverDir === node.path ? "drag-over" : ""}
           draggable
@@ -100,8 +123,10 @@ function NodeView({
               node={child}
               activePath={activePath}
               dragOverDir={dragOverDir}
+              expanded={expanded}
               fileChanges={fileChanges}
               onOpen={onOpen}
+              onToggleDir={onToggleDir}
               onContextMenu={onContextMenu}
               onDragStartNode={onDragStartNode}
               onDirDragOver={onDirDragOver}
@@ -150,9 +175,43 @@ export function FileTree({
 }: Props) {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dragOverDir, setDragOverDir] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(ancestorsOf(activePath)));
+  const treeKey = nodes.map((n) => n.path).join("\0");
   const menuRef = useRef<HTMLDivElement>(null);
+  const activePathRef = useRef(activePath);
+  activePathRef.current = activePath;
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const uploadDirRef = useRef<string>("");
+
+  // Reset when the project tree identity changes; keep only ancestors of the open file.
+  useEffect(() => {
+    setExpanded(new Set(ancestorsOf(activePathRef.current)));
+  }, [treeKey]);
+
+  // Opening a nested file expands its ancestors so it stays visible.
+  useEffect(() => {
+    if (!activePath) return;
+    setExpanded((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const dir of ancestorsOf(activePath)) {
+        if (!next.has(dir)) {
+          next.add(dir);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [activePath]);
+
+  const onToggleDir = (path: string, open: boolean) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(path);
+      else next.delete(path);
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!menu) return;
@@ -185,6 +244,7 @@ export function FileTree({
   const openMenu = (e: React.MouseEvent, node: TreeNode | null) => {
     e.preventDefault();
     e.stopPropagation();
+    if (readOnly && !(node && node.type === "file")) return;
     setMenu({ x: e.clientX, y: e.clientY, node });
   };
 
@@ -250,26 +310,26 @@ export function FileTree({
           </span>
         </div>
       ) : (
-      <div className="file-tree-actions">
-        <button type="button" className="btn btn-ghost tree-action" onClick={() => onNewFile()} title="New file">
-          New
-        </button>
-        <button type="button" className="btn btn-ghost tree-action" onClick={() => onNewFolder()} title="New folder">
-          Folder
-        </button>
-        <label className="btn btn-ghost tree-action" title="Upload into project">
-          Upload
-          <input
-            type="file"
-            multiple
-            hidden
-            onChange={(e) => {
-              if (e.target.files?.length) onUpload(e.target.files);
-              e.currentTarget.value = "";
-            }}
-          />
-        </label>
-      </div>
+        <div className="file-tree-actions">
+          <button type="button" className="btn btn-ghost tree-action" onClick={() => onNewFile()} title="New file">
+            New
+          </button>
+          <button type="button" className="btn btn-ghost tree-action" onClick={() => onNewFolder()} title="New folder">
+            Folder
+          </button>
+          <label className="btn btn-ghost tree-action" title="Upload into project">
+            Upload
+            <input
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => {
+                if (e.target.files?.length) onUpload(e.target.files);
+                e.currentTarget.value = "";
+              }}
+            />
+          </label>
+        </div>
       )}
       <div
         className={`file-tree${dragOverDir === "" ? " drag-over-root" : ""}`}
@@ -290,8 +350,10 @@ export function FileTree({
             node={node}
             activePath={activePath}
             dragOverDir={dragOverDir}
+            expanded={expanded}
             fileChanges={fileChanges}
             onOpen={onOpen}
+            onToggleDir={onToggleDir}
             onContextMenu={openMenu}
             onDragStartNode={onDragStartNode}
             onDirDragOver={onDirDragOver}
@@ -344,36 +406,36 @@ export function FileTree({
               <button type="button" onClick={() => runMenuAction(() => onOpen(menuNode.path))}>
                 Open
               </button>
-              <div className="context-menu-sep" />
+              {!readOnly && <div className="context-menu-sep" />}
             </>
           )}
           {!readOnly && (
-          <>
-          <button type="button" onClick={() => runMenuAction(() => onNewFile(menuDir))}>
-            New file{menuDir ? ` in ${menuDir}/` : ""}
-          </button>
-          <button type="button" onClick={() => runMenuAction(() => onNewFolder(menuDir))}>
-            New folder{menuDir ? ` in ${menuDir}/` : ""}
-          </button>
-          <button type="button" onClick={() => runMenuAction(() => pickUploadInto(menuDir))}>
-            Upload here
-          </button>
-          {menuNode && (
             <>
-              <div className="context-menu-sep" />
-              <button type="button" onClick={() => runMenuAction(() => onRename(menuNode.path))}>
-                Rename / Move…
+              <button type="button" onClick={() => runMenuAction(() => onNewFile(menuDir))}>
+                New file{menuDir ? ` in ${menuDir}/` : ""}
               </button>
-              <button
-                type="button"
-                className="context-menu-danger"
-                onClick={() => runMenuAction(() => onDelete(menuNode.path))}
-              >
-                Delete {menuNode.type === "directory" ? "folder" : "file"}
+              <button type="button" onClick={() => runMenuAction(() => onNewFolder(menuDir))}>
+                New folder{menuDir ? ` in ${menuDir}/` : ""}
               </button>
+              <button type="button" onClick={() => runMenuAction(() => pickUploadInto(menuDir))}>
+                Upload here
+              </button>
+              {menuNode && (
+                <>
+                  <div className="context-menu-sep" />
+                  <button type="button" onClick={() => runMenuAction(() => onRename(menuNode.path))}>
+                    Rename / Move…
+                  </button>
+                  <button
+                    type="button"
+                    className="context-menu-danger"
+                    onClick={() => runMenuAction(() => onDelete(menuNode.path))}
+                  >
+                    Delete {menuNode.type === "directory" ? "folder" : "file"}
+                  </button>
+                </>
+              )}
             </>
-          )}
-          </>
           )}
         </div>
       )}

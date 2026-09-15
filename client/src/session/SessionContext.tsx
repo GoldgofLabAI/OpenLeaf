@@ -8,7 +8,8 @@ import { guestMe, type GuestIdentity, type GuestMe, type GuestShareInfo } from "
  */
 export type Session =
   | { kind: "loading" }
-  | { kind: "host" }
+  | { kind: "host"; remote: boolean }
+  | { kind: "host-login" }
   | { kind: "guest-inactive"; reason: "no-session" | "expired" }
   | { kind: "guest-login"; share: GuestShareInfo; linkOk: boolean }
   | { kind: "guest"; share: GuestShareInfo; guest: GuestIdentity };
@@ -18,7 +19,8 @@ type Ctx = { session: Session; refresh: () => Promise<void> };
 const SessionCtx = createContext<Ctx>({ session: { kind: "loading" }, refresh: async () => {} });
 
 function fromMe(me: GuestMe): Session {
-  if (me.mode === "host") return { kind: "host" };
+  if (me.mode === "host-login") return { kind: "host-login" };
+  if (me.mode === "host") return { kind: "host", remote: Boolean(me.remote) };
   if (!me.active) return { kind: "guest-inactive", reason: me.reason };
   if (!me.authenticated) return { kind: "guest-login", share: me.share, linkOk: me.linkOk };
   return { kind: "guest", share: me.share, guest: me.guest };
@@ -31,8 +33,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     try {
       setSession(fromMe(await guestMe()));
     } catch {
-      // Server unreachable or ancient server without the endpoint: behave as before.
-      setSession({ kind: "host" });
+      // Keep an established guest or host-login session if the probe fails
+      // (network blip). Only the first load may fall back to local host.
+      setSession((prev) => (prev.kind === "loading" ? { kind: "host", remote: false } : prev));
     }
   }, []);
 
@@ -41,12 +44,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   // Guests: poll often so ending the session (or expiry) kicks them to a clear
-  // screen without needing a manual refresh.
+  // screen without needing a manual refresh. Remote host: slower check so an
+  // expired cookie returns to the login page.
+  const remoteHost = session.kind === "host" && session.remote;
+  const guestLike = session.kind === "guest" || session.kind === "guest-login";
+
   useEffect(() => {
-    if (session.kind !== "guest" && session.kind !== "guest-login") return;
-    const t = window.setInterval(() => void refresh(), 3000);
+    if (!guestLike && !remoteHost) return;
+    const ms = remoteHost ? 30_000 : 3000;
+    const t = window.setInterval(() => void refresh(), ms);
     return () => window.clearInterval(t);
-  }, [session.kind, refresh]);
+  }, [guestLike, remoteHost, refresh]);
 
   // Exact deadline: don't wait for the next poll tick.
   useEffect(() => {
@@ -64,7 +72,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Coming back to the tab: re-check immediately.
   useEffect(() => {
-    if (session.kind !== "guest" && session.kind !== "guest-login") return;
+    if (!guestLike && !remoteHost) return;
     const onVis = () => {
       if (document.visibilityState === "visible") void refresh();
     };
@@ -74,7 +82,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onVis);
     };
-  }, [session.kind, refresh]);
+  }, [guestLike, remoteHost, refresh]);
 
   const value = useMemo(() => ({ session, refresh }), [session, refresh]);
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;

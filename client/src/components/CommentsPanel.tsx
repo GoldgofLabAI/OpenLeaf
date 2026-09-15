@@ -27,6 +27,8 @@ type Props = {
   onThreadsChange?: (threads: CommentThread[]) => void;
   /** Open / highlight a thread (e.g. from editor gutter click). */
   focusThreadId?: string | null;
+  /** When set, guests may only delete threads they authored. Hosts omit this. */
+  canDeleteThread?: (thread: CommentThread) => boolean;
 };
 
 function formatWhen(iso: string): string {
@@ -103,6 +105,7 @@ export function CommentsPanel({
   onJump,
   onThreadsChange,
   focusThreadId = null,
+  canDeleteThread,
 }: Props) {
   const [threads, setThreads] = useState<CommentThread[]>([]);
   const [loading, setLoading] = useState(false);
@@ -420,6 +423,7 @@ export function CommentsPanel({
                             >
                               {t.resolved ? "Reopen" : "Resolve"}
                             </button>
+                            {(!canDeleteThread || canDeleteThread(t)) && (
                             <button
                               type="button"
                               className="btn btn-ghost"
@@ -428,6 +432,7 @@ export function CommentsPanel({
                             >
                               Delete
                             </button>
+                            )}
                           </div>
                         </>
                       )}

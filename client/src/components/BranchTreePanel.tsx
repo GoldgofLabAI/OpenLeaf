@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   checkoutProjectTimeline,
-  commitProjectTimeline,
   deleteProjectTimelineTrashForever,
   forkProjectTimeline,
   getBranchLeaves,
@@ -15,7 +14,8 @@ import {
 } from "../api/client";
 import type { TimelineBranch, TimelineNode, TimelineView } from "../api/types";
 import { TimelineGraph } from "./TimelineGraph";
-import { formatWhen } from "./timelineLayout";
+import { formatWhen, isAiBranch } from "./timelineLayout";
+import { applyMergeTipPick } from "./mergeCompose";
 
 type Props = {
   projectId: string;
@@ -31,11 +31,12 @@ type Props = {
   guestBranchId?: string | null;
   leavesVersion?: number;
   onHighlightSince?: (gitHash: string) => void;
+  /** Fired after a leaf is successfully opened (checkout / observe). */
+  onOpenNode?: (node: TimelineNode, branch: TimelineBranch) => void;
 };
 
 export function BranchTreePanel({
   projectId,
-  identityId,
   open,
   onClose,
   onTimelineChange,
@@ -47,6 +48,7 @@ export function BranchTreePanel({
   guestBranchId = null,
   leavesVersion = 0,
   onHighlightSince,
+  onOpenNode,
 }: Props) {
   const [view, setView] = useState<TimelineView | null>(null);
   const [leafStats, setLeafStats] = useState<BranchLeafStat[]>([]);
@@ -55,7 +57,6 @@ export function BranchTreePanel({
   const [busy, setBusy] = useState(false);
   const [forkFrom, setForkFrom] = useState<TimelineNode | null>(null);
   const [forkName, setForkName] = useState("");
-  const [commitMsg, setCommitMsg] = useState("");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [pinnedId, setPinnedId] = useState<string | null>(null);
   const [recenterToken, setRecenterToken] = useState(0);
@@ -63,7 +64,12 @@ export function BranchTreePanel({
   const [trash, setTrash] = useState<PrunedTipInfo[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<PrunedTipInfo | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
-  const [mergeTarget, setMergeTarget] = useState<{ id: string; name: string } | null>(null);
+  const [mergeDraft, setMergeDraft] = useState<{
+    filling: "from" | "into";
+    fromBranchId: string | null;
+    intoBranchId: string | null;
+  } | null>(null);
+  const [leafMoreOpen, setLeafMoreOpen] = useState(false);
 
   /** Stick the hover dock so actions (Prune, etc.) remain clickable. */
   const keepDock = useCallback((id: string | null) => {
@@ -75,16 +81,22 @@ export function BranchTreePanel({
   }, []);
 
   useEffect(() => {
-    if (!open || !hoveredId) return;
+    if (!open || (!hoveredId && !pinnedId) || mergeDraft) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") dismissDock();
+      if (e.key === "Escape") {
+        dismissDock();
+        setPinnedId(null);
+        setLeafMoreOpen(false);
+      }
     };
     const onDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement;
-      if (t.closest(".tl-hover-dock, .tl-orb, .tl-fork-modal, .tl-trash-delete-modal, .tl-trash-panel")) {
+      if (t.closest(".tl-hover-dock, .tl-orb, .tl-fork-modal, .tl-trash-delete-modal, .tl-trash-panel, .tl-merge-composer")) {
         return;
       }
       dismissDock();
+      setPinnedId(null);
+      setLeafMoreOpen(false);
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("mousedown", onDown);
@@ -92,7 +104,34 @@ export function BranchTreePanel({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onDown);
     };
-  }, [open, hoveredId, dismissDock]);
+  }, [open, hoveredId, pinnedId, mergeDraft, dismissDock]);
+
+  useEffect(() => {
+    if (!open || !mergeDraft) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setMergeDraft(null);
+        setError(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, mergeDraft]);
+
+  useEffect(() => {
+    if (!forkFrom && !deleteTarget) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (deleteTarget) {
+        setDeleteTarget(null);
+        setDeleteConfirm("");
+        return;
+      }
+      setForkFrom(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [forkFrom, deleteTarget]);
 
   const refreshLeaves = useCallback(async () => {
     try {
@@ -144,12 +183,6 @@ export function BranchTreePanel({
     return m;
   }, [leafStats]);
 
-  const activeId = view?.viewingNodeId ?? view?.activeBranch.headNodeId ?? null;
-  const hotId = hoveredId ?? pinnedId ?? activeId;
-  const hover = hoveredId && view ? view.nodes.find((n) => n.id === hoveredId) : null;
-  const hoverBranch =
-    hover && view ? view.branches.find((b) => b.id === hover.branchId) ?? null : null;
-
   const selectNode = async (node: TimelineNode, branch: TimelineBranch) => {
     setBusy(true);
     setError(null);
@@ -164,6 +197,7 @@ export function BranchTreePanel({
         const next = await getProjectTimeline(projectId, branch.id);
         setView(next);
         onTimelineChange(next);
+        onOpenNode?.(node, branch);
         return;
       }
       if (!canCheckout) return;
@@ -173,6 +207,7 @@ export function BranchTreePanel({
       });
       setView(next);
       onTimelineChange(next);
+      onOpenNode?.(node, branch);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not open that leaf");
     } finally {
@@ -208,7 +243,7 @@ export function BranchTreePanel({
   };
 
   const onPruneTip = async (branch: TimelineBranch) => {
-    const isAi = branch.name.startsWith("ai/") || branch.id.startsWith("ai/");
+    const isAi = isAiBranch(branch);
     const lines = [
       `Prune tip “${branch.name}”?`,
       "",
@@ -306,56 +341,66 @@ export function BranchTreePanel({
     }
   };
 
-  const onCommit = async () => {
-    if (!commitMsg.trim() || !view) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await commitProjectTimeline(projectId, {
-        message: commitMsg.trim(),
-        branchId: view.activeBranchId,
-        identityId,
-      });
-      setCommitMsg("");
-      setView(result.timeline);
-      onTimelineChange(result.timeline);
-      setRecenterToken((n) => n + 1);
-      await refreshLeaves();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Commit failed");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const openMergePreflight = (sourceBranchId: string, sourceName: string) => {
+  const beginMerge = () => {
     if (!view || !onMergeStarted) return;
-    if (!view.canEdit) {
-      setError("Open your editable tip first — merge lands on the tip you’re currently editing");
+    setError(null);
+    setHoveredId(null);
+    setPinnedId(null);
+    setLeafMoreOpen(false);
+    setMergeDraft({
+      filling: "from",
+      fromBranchId: null,
+      intoBranchId: view.canEdit && view.activeBranch.headNodeId ? view.activeBranchId : null,
+    });
+  };
+
+  const pickMergeTip = (branch: TimelineBranch) => {
+    if (!mergeDraft) return;
+    if (!branch.headNodeId) {
+      setError("This thread has no tip yet — commit first");
       return;
     }
-    if (sourceBranchId === view.activeBranchId) {
-      setError("Pick another branch tip to merge into the current leaf");
+    const next = applyMergeTipPick(mergeDraft, branch.id);
+    if (!next.ok) {
+      setError(next.error);
       return;
     }
     setError(null);
-    setMergeTarget({ id: sourceBranchId, name: sourceName });
+    setMergeDraft(next.draft);
   };
 
-  const confirmMergeIntoCurrent = async () => {
-    if (!view || !onMergeStarted || !mergeTarget) return;
-    if (view.dirty) {
-      setError("Commit or discard local edits on the current tip before merging");
+  const swapMergeSlots = () => {
+    if (!mergeDraft?.fromBranchId || !mergeDraft.intoBranchId) return;
+    setMergeDraft({
+      filling: mergeDraft.filling === "from" ? "into" : "from",
+      fromBranchId: mergeDraft.intoBranchId,
+      intoBranchId: mergeDraft.fromBranchId,
+    });
+  };
+
+  const confirmMerge = async () => {
+    if (!view || !onMergeStarted || !mergeDraft?.fromBranchId || !mergeDraft.intoBranchId) return;
+    const intoId = mergeDraft.intoBranchId;
+    const intoDirty =
+      (view.activeBranchId === intoId && !view.viewingNodeId && view.dirty) ||
+      Boolean(leafByBranch.get(intoId)?.dirty);
+    if (intoDirty) {
+      setError("Commit or discard edits on the landing tip before merging");
       return;
     }
     setBusy(true);
     setError(null);
     try {
+      if (view.activeBranchId !== intoId || view.viewingNodeId) {
+        const next = await checkoutProjectTimeline(projectId, { branchId: intoId, nodeId: null });
+        setView(next);
+        onTimelineChange(next);
+      }
       const session = await startProjectMerge(projectId, {
-        sourceBranchId: mergeTarget.id,
-        targetBranchId: view.activeBranchId,
+        sourceBranchId: mergeDraft.fromBranchId,
+        targetBranchId: intoId,
       });
-      setMergeTarget(null);
+      setMergeDraft(null);
       onMergeStarted(session);
       onClose();
     } catch (err) {
@@ -365,11 +410,49 @@ export function BranchTreePanel({
     }
   };
 
+  const onGraphClick = (node: TimelineNode, branch: TimelineBranch) => {
+    if (mergeDraft) {
+      if (branch.headNodeId !== node.id) {
+        setError("Merges use tips — tap the pulsing end of a thread");
+        return;
+      }
+      pickMergeTip(branch);
+      return;
+    }
+    if (pinnedId === node.id) {
+      void selectNode(node, branch);
+      return;
+    }
+    setPinnedId(node.id);
+    setHoveredId(node.id);
+    setLeafMoreOpen(false);
+  };
+
   if (!open) return null;
 
+  const activeId = view?.viewingNodeId ?? view?.activeBranch.headNodeId ?? null;
+  const fromBranch =
+    mergeDraft?.fromBranchId && view
+      ? view.branches.find((b) => b.id === mergeDraft.fromBranchId) ?? null
+      : null;
+  const intoBranch =
+    mergeDraft?.intoBranchId && view
+      ? view.branches.find((b) => b.id === mergeDraft.intoBranchId) ?? null
+      : null;
+  const fromHead = fromBranch?.headNodeId ?? null;
+  const intoHead = intoBranch?.headNodeId ?? null;
+  const intoDirty =
+    Boolean(intoBranch) &&
+    ((view?.activeBranchId === intoBranch?.id && !view?.viewingNodeId && Boolean(view?.dirty)) ||
+      Boolean(intoBranch && leafByBranch.get(intoBranch.id)?.dirty));
+  const hotId = mergeDraft ? null : hoveredId ?? pinnedId ?? activeId;
+  const focusId = mergeDraft ? null : pinnedId;
+  const hover = focusId && view ? view.nodes.find((n) => n.id === focusId) : null;
+  const hoverBranch =
+    hover && view ? view.branches.find((b) => b.id === hover.branchId) ?? null : null;
   const hoverIsHead = Boolean(hoverBranch && hover && hoverBranch.headNodeId === hover.id);
   const hoverIsSacred = Boolean(hoverBranch?.sacred);
-  const hoverIsAi = Boolean(hoverBranch?.name.startsWith("ai/"));
+  const hoverIsAi = isAiBranch(hoverBranch);
   const showTrash = canPrune && !guestBranchId;
 
   return (
@@ -380,6 +463,30 @@ export function BranchTreePanel({
           {view ? ` · ${view.nodes.length} leaf${view.nodes.length === 1 ? "" : "ves"}` : ""}
         </strong>
         <div className="history-drawer-actions">
+          {canMerge && !guestBranchId && onMergeStarted && !mergeDraft && (
+            <button
+              type="button"
+              className="btn btn-quiet tl-merge-btn"
+              disabled={busy || loading || !view}
+              onClick={() => beginMerge()}
+              title="Bring one tip into another — tap two tips on the graph"
+            >
+              Merge
+            </button>
+          )}
+          {mergeDraft && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              onClick={() => {
+                setMergeDraft(null);
+                setError(null);
+              }}
+            >
+              Cancel
+            </button>
+          )}
           {showTrash && (
             <button
               type="button"
@@ -425,11 +532,90 @@ export function BranchTreePanel({
       </div>
 
       <p className="history-hint timeline-hint">
-        Time left → right. Hover a tip for actions. To merge: stay on the tip that should receive changes, then hover
-        another tip → <em>Merge in</em>. Host-only prune moves tips to Trash.
+        {mergeDraft
+          ? mergeDraft.filling === "from"
+            ? "Tap the tip to bring in. The blinking line is a preview of the merge."
+            : mergeDraft.fromBranchId
+              ? "Tap the tip that should receive it — or Start merge if both sides are set."
+              : "Tap the tip that should receive the incoming work."
+          : "Time runs left → right. Tap a leaf to inspect, tap again to open. Merge is a two-tap on tips."}
       </p>
 
       {error && <div className="error-banner">{error}</div>}
+
+      {mergeDraft && view && (
+        <div className="tl-merge-composer" role="region" aria-label="Compose merge">
+          <div className="tl-merge-slots">
+            <button
+              type="button"
+              className={`tl-merge-slot is-from${mergeDraft.filling === "from" ? " is-filling" : ""}${fromBranch ? " is-set" : ""}`}
+              onClick={() => setMergeDraft({ ...mergeDraft, filling: "from" })}
+            >
+              <span className="tl-merge-slot-kicker">From</span>
+              <span className="tl-merge-slot-value">{fromBranch ? fromBranch.name : "Tap a tip"}</span>
+            </button>
+            <button
+              type="button"
+              className="tl-merge-swap"
+              onClick={() => swapMergeSlots()}
+              disabled={!fromBranch || !intoBranch}
+              title="Swap from and into"
+              aria-label="Swap from and into"
+            >
+              →
+            </button>
+            <button
+              type="button"
+              className={`tl-merge-slot is-into${mergeDraft.filling === "into" ? " is-filling" : ""}${intoBranch ? " is-set" : ""}`}
+              onClick={() => setMergeDraft({ ...mergeDraft, filling: "into" })}
+            >
+              <span className="tl-merge-slot-kicker">Into</span>
+              <span className="tl-merge-slot-value">{intoBranch ? intoBranch.name : "Tap a tip"}</span>
+            </button>
+          </div>
+          {fromBranch && intoBranch && (
+            <p className="tl-merge-preview-copy">
+              After merge, <code>{intoBranch.name}</code> grows a new leaf, with a dotted line from{" "}
+              <code>{fromBranch.name}</code> — blinking on the graph until you start.
+            </p>
+          )}
+          <ul className="tl-merge-checklist">
+            <li className={fromBranch && intoBranch && fromBranch.id !== intoBranch.id ? "is-ok" : "is-bad"}>
+              {fromBranch && intoBranch && fromBranch.id !== intoBranch.id
+                ? `Bring ${fromBranch.name} into ${intoBranch.name}`
+                : "Pick two different tips"}
+            </li>
+            <li className={intoBranch && !intoDirty ? "is-ok" : "is-bad"}>
+              {intoBranch && !intoDirty
+                ? "Landing tip is clean"
+                : intoBranch
+                  ? "Landing tip has uncommitted edits — commit first"
+                  : "Landing tip not chosen yet"}
+            </li>
+          </ul>
+          <div className="history-drawer-actions tl-merge-composer-actions">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              onClick={() => {
+                setMergeDraft(null);
+                setError(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={busy || !fromBranch || !intoBranch || intoDirty}
+              onClick={() => void confirmMerge()}
+            >
+              {busy ? "Starting…" : "Start merge"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {showTrash && trashOpen && (
         <div className="tl-trash-panel" role="region" aria-label="Pruned tips trash">
@@ -481,28 +667,6 @@ export function BranchTreePanel({
         </div>
       )}
 
-      {view &&
-        view.canEdit &&
-        (!guestBranchId || view.activeBranchId === guestBranchId) && (
-          <div className="timeline-commit-row">
-            <input
-              type="text"
-              placeholder={`Commit on ${view.activeBranch.name}…`}
-              value={commitMsg}
-              onChange={(e) => setCommitMsg(e.target.value)}
-              disabled={busy}
-            />
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy || !commitMsg.trim()}
-              onClick={() => void onCommit()}
-            >
-              Commit
-            </button>
-          </div>
-        )}
-
       <TimelineGraph
         view={view}
         loading={loading}
@@ -512,20 +676,22 @@ export function BranchTreePanel({
         recenterToken={recenterToken}
         busy={busy}
         emptyLabel="No leaves yet — commit on a tip to begin."
-        onHoverIdChange={keepDock}
-        onNodeClick={(node, branch) => void selectNode(node, branch)}
+        onHoverIdChange={mergeDraft ? undefined : keepDock}
+        onNodeClick={(node, branch) => onGraphClick(node, branch)}
+        merging={Boolean(mergeDraft)}
+        mergeFromId={fromHead}
+        mergeIntoId={intoHead}
       >
         {hover && hoverBranch && (
           <div
             className={`tl-hover-dock${hoverIsSacred ? " is-sacred" : ""}${hoverIsAi ? " is-ai" : ""}`}
-            onMouseEnter={() => keepDock(hover.id)}
           >
             <div className="tl-hover-dock-main">
               <div className="tl-card-title">{hover.message || "Untitled leaf"}</div>
               <div className="tl-card-meta">
                 <span className="tl-card-branch">{hoverBranch.name}</span>
                 {hoverIsHead && <span>tip</span>}
-                {hoverIsAi && <span>AI</span>}
+                {hoverIsAi && <span className="tl-ai-tag">AI</span>}
                 {hover.legacy && <span>legacy</span>}
                 {hoverIsHead && leafByBranch.get(hoverBranch.id)?.dirty && (
                   <span className="tl-meta-dirty">
@@ -545,7 +711,7 @@ export function BranchTreePanel({
               {canCheckout && !guestBranchId && (
                 <button
                   type="button"
-                  className="btn btn-ghost"
+                  className="btn btn-primary"
                   disabled={busy}
                   onClick={() => void selectNode(hover, hoverBranch)}
                 >
@@ -555,7 +721,7 @@ export function BranchTreePanel({
               {guestBranchId && hoverIsHead && (
                 <button
                   type="button"
-                  className="btn btn-ghost"
+                  className="btn btn-primary"
                   disabled={busy}
                   onClick={() => void selectNode(hover, hoverBranch)}
                 >
@@ -578,22 +744,35 @@ export function BranchTreePanel({
                   Fork
                 </button>
               )}
-              {canMerge &&
-                !guestBranchId &&
-                hoverIsHead &&
-                view?.canEdit &&
-                hoverBranch.id !== view.activeBranchId && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost tl-merge-btn"
-                    disabled={busy}
-                    title={`Merge “${hoverBranch.name}” into your current tip “${view.activeBranch.name}”`}
-                    onClick={() => openMergePreflight(hoverBranch.id, hoverBranch.name)}
-                  >
-                    Merge in
-                  </button>
-                )}
-              {canPrune &&
+              {(onHighlightSince ||
+                (canPrune &&
+                  !guestBranchId &&
+                  hoverIsHead &&
+                  !hoverIsSacred &&
+                  hoverBranch.id !== "main")) && (
+                <button
+                  type="button"
+                  className={`btn btn-ghost${leafMoreOpen ? " is-active" : ""}`}
+                  onClick={() => setLeafMoreOpen((v) => !v)}
+                  aria-expanded={leafMoreOpen}
+                >
+                  More
+                </button>
+              )}
+              {leafMoreOpen && onHighlightSince && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => {
+                    onHighlightSince(hover.gitHash);
+                    onClose();
+                  }}
+                >
+                  Compare
+                </button>
+              )}
+              {leafMoreOpen &&
+                canPrune &&
                 !guestBranchId &&
                 hoverIsHead &&
                 !hoverIsSacred &&
@@ -608,25 +787,13 @@ export function BranchTreePanel({
                     Prune
                   </button>
                 )}
-              {onHighlightSince && (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => {
-                    onHighlightSince(hover.gitHash);
-                    onClose();
-                  }}
-                >
-                  Compare
-                </button>
-              )}
             </div>
           </div>
         )}
       </TimelineGraph>
 
       {forkFrom && (
-        <div className="tl-fork-modal timeline-fork-modal" role="dialog">
+        <div className="tl-fork-modal timeline-fork-modal" role="dialog" aria-modal="true" aria-label="Fork a new thread">
           <strong>Fork a new thread</strong>
           <p className="share-muted">
             Name the branch that peels away from “{forkFrom.message.slice(0, 60)}”. You’ll land on its editable tip.
@@ -692,51 +859,6 @@ export function BranchTreePanel({
               onClick={() => void onDeleteForever()}
             >
               {busy ? "Deleting…" : "Delete forever"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {mergeTarget && view && (
-        <div className="tl-fork-modal timeline-fork-modal tl-merge-modal" role="dialog" aria-modal="true">
-          <strong>Merge into current tip</strong>
-          <div className="merge-flow tl-merge-flow" aria-label="Merge direction">
-            <span className="merge-flow-chip is-source">{mergeTarget.name}</span>
-            <span className="merge-flow-arrow" aria-hidden>
-              →
-            </span>
-            <span className="merge-flow-chip is-target">{view.activeBranch.name}</span>
-          </div>
-          <p className="share-muted">
-            Incoming changes from <code>{mergeTarget.name}</code> land on your current tip{" "}
-            <code>{view.activeBranch.name}</code>. You’ll review any conflicts before completing.
-          </p>
-          <ul className="tl-merge-checklist">
-            <li className={view.canEdit ? "is-ok" : "is-bad"}>
-              {view.canEdit ? "Editing an open tip" : "Not on an editable tip — open your tip first"}
-            </li>
-            <li className={!view.dirty ? "is-ok" : "is-bad"}>
-              {!view.dirty
-                ? "Working tree is clean"
-                : "Uncommitted edits on this tip — commit or discard first"}
-            </li>
-          </ul>
-          <div className="history-drawer-actions">
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              onClick={() => setMergeTarget(null)}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy || !view.canEdit || view.dirty}
-              onClick={() => void confirmMergeIntoCurrent()}
-            >
-              {busy ? "Starting…" : "Start merge"}
             </button>
           </div>
         </div>

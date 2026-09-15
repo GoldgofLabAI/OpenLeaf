@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { THEMES, useTheme, type ThemeId } from "../theme";
 
 type Props = {
@@ -11,12 +12,41 @@ export function ThemePicker({ className = "", compact = false }: Props) {
   const { theme, definition, setTheme } = useTheme();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const listId = useId();
+  const [menuBox, setMenuBox] = useState<{ top: number; right: number; maxHeight: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuBox(null);
+      return;
+    }
+    const place = () => {
+      const el = rootRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const top = r.bottom + 8;
+      setMenuBox({
+        top,
+        right: Math.max(8, window.innerWidth - r.right),
+        maxHeight: Math.max(220, window.innerHeight - top - 12),
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
@@ -45,6 +75,7 @@ export function ThemePicker({ className = "", compact = false }: Props) {
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-controls={listId}
+        aria-label={`Theme: ${definition.name}`}
         title={`Theme · ${definition.name}`}
         onClick={() => setOpen((v) => !v)}
       >
@@ -64,46 +95,60 @@ export function ThemePicker({ className = "", compact = false }: Props) {
         </span>
       </button>
 
-      {open && (
-        <div className="theme-picker-menu" id={listId} role="listbox" aria-label="Choose theme">
-          <div className="theme-picker-lede">
-            <span className="theme-picker-lede-kicker">Atmosphere</span>
-            <span className="theme-picker-lede-copy">Ten curated looks for long writing sessions</span>
-          </div>
-          <div className="theme-picker-section">
-            <div className="theme-picker-heading">Classic</div>
-            <div className="theme-picker-grid">
-              {classic.map((t) => (
-                <ThemeOption
-                  key={t.id}
-                  id={t.id}
-                  name={t.name}
-                  tagline={t.tagline}
-                  swatches={t.swatches}
-                  selected={theme === t.id}
-                  onSelect={pick}
-                />
-              ))}
+      {open &&
+        menuBox &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="theme-picker-menu is-floating"
+            id={listId}
+            role="listbox"
+            aria-label="Choose theme"
+            style={{
+              top: menuBox.top,
+              right: menuBox.right,
+              maxHeight: menuBox.maxHeight,
+            }}
+          >
+            <div className="theme-picker-lede">
+              <span className="theme-picker-lede-kicker">Atmosphere</span>
+              <span className="theme-picker-lede-copy">Ten curated looks for long writing sessions</span>
             </div>
-          </div>
-          <div className="theme-picker-section">
-            <div className="theme-picker-heading">Signature</div>
-            <div className="theme-picker-grid">
-              {signature.map((t) => (
-                <ThemeOption
-                  key={t.id}
-                  id={t.id}
-                  name={t.name}
-                  tagline={t.tagline}
-                  swatches={t.swatches}
-                  selected={theme === t.id}
-                  onSelect={pick}
-                />
-              ))}
+            <div className="theme-picker-section">
+              <div className="theme-picker-heading">Classic</div>
+              <div className="theme-picker-grid">
+                {classic.map((t) => (
+                  <ThemeOption
+                    key={t.id}
+                    id={t.id}
+                    name={t.name}
+                    tagline={t.tagline}
+                    swatches={t.swatches}
+                    selected={theme === t.id}
+                    onSelect={pick}
+                  />
+                ))}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+            <div className="theme-picker-section">
+              <div className="theme-picker-heading">Signature</div>
+              <div className="theme-picker-grid">
+                {signature.map((t) => (
+                  <ThemeOption
+                    key={t.id}
+                    id={t.id}
+                    name={t.name}
+                    tagline={t.tagline}
+                    swatches={t.swatches}
+                    selected={theme === t.id}
+                    onSelect={pick}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

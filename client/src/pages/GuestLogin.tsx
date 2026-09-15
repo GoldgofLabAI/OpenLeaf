@@ -77,6 +77,7 @@ export function GuestLogin({ share, linkOk }: { share: GuestShareInfo; linkOk: b
               className="btn btn-ghost guest-password-toggle"
               onClick={() => setShowPassword((v) => !v)}
               aria-pressed={showPassword}
+              aria-label={showPassword ? "Hide password" : "Show password"}
               title={showPassword ? "Hide password" : "Show password"}
             >
               {showPassword ? "Hide" : "Show"}

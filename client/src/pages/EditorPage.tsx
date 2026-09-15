@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link, useParams } from "react-router-dom";
 import type * as Y from "yjs";
 import {
+  checkoutProjectTimeline,
   compileProject,
   commitProjectTimeline,
   createProjectFile,
@@ -24,15 +26,19 @@ import {
   type MergeSession,
 } from "../api/client";
 import type { AppConfig, FileChangeDiff, GitCommitInfo, ProjectMeta, TimelineView, TreeNode } from "../api/types";
-import { guestLogout } from "../api/share";
+import { guestLogout, hostLogout, listProjectAiReview, acceptAiReview, rejectAiReview, type AiReviewCollaborator, type AiReviewHunk } from "../api/share";
 import { flushCollab, useProjectCollab } from "../collab/useProjectCollab";
 import { BinaryPane } from "../components/BinaryPane";
 import { BranchTreePanel } from "../components/BranchTreePanel";
-import { CodeEditor, type EditorChangeMarks } from "../components/CodeEditor";
+import { CodeEditor, type EditorChangeMarks, type EditorSuggestionMark } from "../components/CodeEditor";
 import { CompareBaselinePicker } from "../components/CompareBaselinePicker";
 import { CompileLog } from "../components/CompileLog";
 import { FileTree } from "../components/FileTree";
 import { CommentsPanel, type CommentDraft } from "../components/CommentsPanel";
+import { AiReviewPanel } from "../components/AiReviewPanel";
+import { AiLinkPanel } from "../components/AiLinkPanel";
+import { AiSuggestionCard } from "../components/AiSuggestionCard";
+import { isAiBranch } from "../components/timelineLayout";
 import { MergePanel } from "../components/MergePanel";
 import { PdfViewer, type PdfDiffOverlay, type PdfHighlight } from "../components/PdfViewer";
 import { SharePanel } from "../components/SharePanel";
@@ -41,6 +47,7 @@ import { ThemePicker } from "../components/ThemeToggle";
 import { extractCitations, extractLabels } from "../latex/completions";
 import type { CommentAnchor, CommentThread, TimelineBranch, TimelineNode } from "../api/types";
 import { useGuest, useSession } from "../session/SessionContext";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 type Status = "idle" | "dirty" | "saving" | "compiling" | "ok" | "err";
 type EditMode = "text" | "binary" | "base64";
@@ -52,6 +59,36 @@ function flattenFiles(nodes: TreeNode[]): string[] {
     else if (n.children) out.push(...flattenFiles(n.children));
   }
   return out;
+}
+
+function flattenReviewHunks(collabs: AiReviewCollaborator[]): { collab: AiReviewCollaborator; hunk: AiReviewHunk }[] {
+  const out: { collab: AiReviewCollaborator; hunk: AiReviewHunk }[] = [];
+  for (const c of collabs) {
+    for (const f of c.files) {
+      for (const h of f.hunks) out.push({ collab: c, hunk: h });
+    }
+  }
+  return out;
+}
+
+function hunkAnchor(hunk: AiReviewHunk): CommentAnchor {
+  const range = hunk.ranges?.[0];
+  return {
+    file: hunk.path,
+    line: range?.startLine ?? Math.max(1, hunk.newStart || 1),
+    column: range?.startColumn ?? 1,
+  };
+}
+
+function findAiHunk(collabs: AiReviewCollaborator[], hunkId: string | null) {
+  if (!hunkId) return null;
+  for (const collab of collabs) {
+    for (const file of collab.files) {
+      const hunk = file.hunks.find((h) => h.id === hunkId);
+      if (hunk) return { collab, file, hunk };
+    }
+  }
+  return null;
 }
 
 function parentDir(filePath: string | null): string {
@@ -154,7 +191,10 @@ function normDiffPath(p: string): string {
 export function EditorPage() {
   const { id = "" } = useParams();
   const guest = useGuest();
-  const { refresh: refreshSession } = useSession();
+  const { session, refresh: refreshSession } = useSession();
+  const isRemoteHost = session.kind === "host" && session.remote;
+  const narrow = useMediaQuery("(max-width: 720px)");
+  const [mobilePane, setMobilePane] = useState<"files" | "source" | "preview">("source");
   const guestIdentity = useMemo(
     () => (guest ? { id: guest.guest.id, name: guest.guest.name, color: guest.guest.color } : null),
     [guest?.guest.id, guest?.guest.name, guest?.guest.color],
@@ -166,20 +206,26 @@ export function EditorPage() {
   const canHistory = !guest || guest.share.allowHistory;
   const guestBranchId = guest?.share.branchId ?? null;
   const [branchId, setBranchId] = useState(guestBranchId || "main");
+  const branchIdRef = useRef(branchId);
+  branchIdRef.current = branchId;
   const [timelineCanEdit, setTimelineCanEdit] = useState(true);
   const [viewingGitHash, setViewingGitHash] = useState<string | null>(null);
   const [branchLabel, setBranchLabel] = useState(guest?.share.branchName || "main");
   const collab = useProjectCollab(id || undefined, guestIdentity, branchId);
   const [shareOpen, setShareOpen] = useState(false);
+  const [aiLinksOpen, setAiLinksOpen] = useState(false);
   const [shareActive, setShareActive] = useState(false);
+  const [shareCount, setShareCount] = useState(0);
+  const [aiLinkCount, setAiLinkCount] = useState(0);
   const [shareExpiresAt, setShareExpiresAt] = useState<number | null | undefined>(undefined);
   const [shareTimerLabel, setShareTimerLabel] = useState("Live link");
   const [shareUrgent, setShareUrgent] = useState(false);
   const shareExpiresAtRef = useRef(shareExpiresAt);
   shareExpiresAtRef.current = shareExpiresAt;
 
-  const onShareStatus = useCallback((info: { active: boolean; expiresAt: number | null | undefined }) => {
+  const onShareStatus = useCallback((info: { active: boolean; count?: number; expiresAt: number | null | undefined }) => {
     setShareActive(info.active);
+    setShareCount(info.count ?? (info.active ? 1 : 0));
     setShareExpiresAt(info.expiresAt);
   }, []);
 
@@ -227,7 +273,9 @@ export function EditorPage() {
     base64: string;
   } | null>(null);
   const [log, setLog] = useState("");
-  const [logOpen, setLogOpen] = useState(true);
+  const [logOpen, setLogOpen] = useState(() =>
+    typeof window === "undefined" ? true : !window.matchMedia("(max-width: 720px)").matches,
+  );
   const [status, setStatus] = useState<Status>("idle");
   const [pdfBust, setPdfBust] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -237,6 +285,11 @@ export function EditorPage() {
     const n = Number(localStorage.getItem("openleaf.treeWidth") ?? 240);
     return Number.isFinite(n) ? Math.min(420, Math.max(160, n)) : 240;
   });
+  const treeWidthRef = useRef(treeWidth);
+  treeWidthRef.current = treeWidth;
+  const [treeCollapsed, setTreeCollapsed] = useState(
+    () => localStorage.getItem("openleaf.treeCollapsed") === "1",
+  );
   const [treeDragging, setTreeDragging] = useState(false);
   const [jumpTo, setJumpTo] = useState<{
     path?: string;
@@ -257,8 +310,31 @@ export function EditorPage() {
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeSession, setMergeSession] = useState<MergeSession | null>(null);
   const [commentsOpen, setCommentsOpen] = useState(false);
+  const [aiReviewOpen, setAiReviewOpen] = useState(false);
+  const [aiReviewCount, setAiReviewCount] = useState(0);
+  const [aiCollabs, setAiCollabs] = useState<AiReviewCollaborator[]>([]);
+  const [aiActiveId, setAiActiveId] = useState<string | null>(null);
+  const [aiFocusBranchId, setAiFocusBranchId] = useState<string | null>(null);
+  const [aiFocusNonce, setAiFocusNonce] = useState(0);
+  const [aiPopupBusy, setAiPopupBusy] = useState(false);
   const [toolbarMoreOpen, setToolbarMoreOpen] = useState(false);
   const toolbarMoreRef = useRef<HTMLDivElement>(null);
+  const toolbarMoreBtnRef = useRef<HTMLButtonElement>(null);
+  const toolbarMenuRef = useRef<HTMLDivElement>(null);
+  const [toolbarMenuBox, setToolbarMenuBox] = useState<{
+    top: number;
+    right: number;
+    maxHeight: number;
+  } | null>(null);
+
+  const closeOverlappingChrome = useCallback((keep?: "history" | "comments" | "ai" | "share" | "aiLinks") => {
+    setToolbarMoreOpen(false);
+    if (keep !== "history") setHistoryOpen(false);
+    if (keep !== "comments") setCommentsOpen(false);
+    if (keep !== "ai") setAiReviewOpen(false);
+    if (keep !== "share") setShareOpen(false);
+    if (keep !== "aiLinks") setAiLinksOpen(false);
+  }, []);
   const [commitBusy, setCommitBusy] = useState(false);
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
   const [commentThreads, setCommentThreads] = useState<CommentThread[]>([]);
@@ -283,6 +359,9 @@ export function EditorPage() {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const activePathRef = useRef(activePath);
   activePathRef.current = activePath;
+  const aiCollabsRef = useRef(aiCollabs);
+  aiCollabsRef.current = aiCollabs;
+  const consumedAiFocusNonce = useRef(0);
   const [fileReady, setFileReady] = useState(false);
   const [tooLargeBytes, setTooLargeBytes] = useState<number | null>(null);
 
@@ -295,12 +374,39 @@ export function EditorPage() {
     fileReady &&
     (collabText ? liveContent !== flushedContent : content !== savedContent);
 
+  useLayoutEffect(() => {
+    if (!toolbarMoreOpen) {
+      setToolbarMenuBox(null);
+      return;
+    }
+    const place = () => {
+      const btn = toolbarMoreBtnRef.current;
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      const top = r.bottom + 6;
+      setToolbarMenuBox({
+        top,
+        right: Math.max(8, window.innerWidth - r.right),
+        maxHeight: Math.max(160, window.innerHeight - top - 12),
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [toolbarMoreOpen]);
+
   useEffect(() => {
     if (!toolbarMoreOpen) return;
     const onPointer = (e: MouseEvent) => {
-      if (!toolbarMoreRef.current?.contains(e.target as Node)) {
-        setToolbarMoreOpen(false);
-      }
+      const t = e.target as Node;
+      const el = e.target as HTMLElement | null;
+      if (toolbarMoreRef.current?.contains(t) || toolbarMenuRef.current?.contains(t)) return;
+      if (el?.closest(".theme-picker-menu")) return;
+      setToolbarMoreOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setToolbarMoreOpen(false);
@@ -424,6 +530,42 @@ export function EditorPage() {
   }, [id, collab.commentsVersion]);
 
   useEffect(() => {
+    if (!id || isGuest) {
+      setAiReviewCount(0);
+      setAiCollabs([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await listProjectAiReview(id);
+        if (!cancelled) {
+          setAiReviewCount(data.hunkCount);
+          setAiCollabs(data.collaborators);
+        }
+      } catch {
+        if (!cancelled) setAiReviewCount(0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, isGuest, collab.aiReviewVersion]);
+
+  useEffect(() => {
+    if (!id || isGuest) return;
+    const t = window.setInterval(() => {
+      void listProjectAiReview(id)
+        .then((data) => {
+          setAiReviewCount(data.hunkCount);
+          setAiCollabs(data.collaborators);
+        })
+        .catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(t);
+  }, [id, isGuest]);
+
+  useEffect(() => {
     if (!id) {
       setDiffOn(false);
       setDiffSince("");
@@ -524,6 +666,46 @@ export function EditorPage() {
       deletedFile: entry.status === "deleted",
     };
   }, [diffOn, activePath, diffChanges]);
+
+  const suggestionMarks: EditorSuggestionMark[] = useMemo(() => {
+    if (!activePath) return [];
+    const out: EditorSuggestionMark[] = [];
+    for (const c of aiCollabs) {
+      if (c.branchId !== branchId) continue;
+      for (const f of c.files) {
+        if (f.path !== activePath) continue;
+        for (const h of f.hunks) {
+          for (const r of h.ranges ?? []) {
+            out.push({
+              id: h.id,
+              startLine: r.startLine,
+              startColumn: r.startColumn,
+              endLine: r.endLine,
+              endColumn: r.endColumn,
+            });
+          }
+        }
+      }
+    }
+    return out;
+  }, [aiCollabs, activePath, branchId]);
+
+  const activeAiHit = findAiHunk(aiCollabs, aiActiveId);
+  const reviewHunks = useMemo(() => flattenReviewHunks(aiCollabs), [aiCollabs]);
+  const reviewNavIndex = reviewHunks.findIndex((x) => x.hunk.id === aiActiveId);
+
+  const onAiCollabsChange = useCallback((next: AiReviewCollaborator[]) => {
+    setAiCollabs(next);
+  }, []);
+
+  const reopenAiLeafNotifications = useCallback((branch: TimelineBranch) => {
+    if (isGuest || !isAiBranch(branch)) return;
+    closeOverlappingChrome("ai");
+    setAiReviewOpen(!narrow);
+    if (narrow) setMobilePane("source");
+    setAiFocusBranchId(branch.id);
+    setAiFocusNonce((n) => n + 1);
+  }, [isGuest, narrow, closeOverlappingChrome]);
 
   const activeChangeHint =
     activePath && fileChangeMap
@@ -716,8 +898,8 @@ export function EditorPage() {
   ]);
 
   useEffect(() => {
-    if (!treeDragging) return;
-    const onMove = (e: MouseEvent) => {
+    if (!treeDragging || treeCollapsed) return;
+    const onMove = (e: PointerEvent) => {
       const el = workspaceRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
@@ -726,23 +908,35 @@ export function EditorPage() {
     };
     const onUp = () => {
       setTreeDragging(false);
-      localStorage.setItem("openleaf.treeWidth", String(treeWidth));
+      localStorage.setItem("openleaf.treeWidth", String(treeWidthRef.current));
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
-  }, [treeDragging, treeWidth]);
+  }, [treeDragging, treeCollapsed]);
+
+  const toggleTreeCollapsed = useCallback(() => {
+    setTreeCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem("openleaf.treeCollapsed", next ? "1" : "0");
+      return next;
+    });
+  }, []);
 
   const runCompile = useCallback(async (opts?: { auto?: boolean }) => {
     if (!id || compileLock.current || !canCompile) return false;
     compileLock.current = true;
+    const startedOn = branchIdRef.current;
+    const startedLabel = branchLabel;
     setStatus("compiling");
     if (!opts?.auto) {
       setLog("");
@@ -750,18 +944,22 @@ export function EditorPage() {
     } else {
       setLog((prev) =>
         prev
-          ? `${prev}\n\n[openleaf] Building PDF for “${branchLabel}”…\n`
-          : `[openleaf] Building PDF for “${branchLabel}”…\n`,
+          ? `${prev}\n\n[openleaf] Building PDF for “${startedLabel}”…\n`
+          : `[openleaf] Building PDF for “${startedLabel}”…\n`,
       );
     }
     try {
       const result = await compileProject(
         id,
         {
-          onLog: (chunk) => setLog((prev) => prev + chunk),
+          onLog: (chunk) => {
+            if (branchIdRef.current !== startedOn) return;
+            setLog((prev) => prev + chunk);
+          },
         },
-        { branchId },
+        { branchId: startedOn },
       );
+      if (branchIdRef.current !== startedOn) return false;
       setLog((prev) => prev || result.log);
       if (result.ok) {
         setStatus("ok");
@@ -773,14 +971,18 @@ export function EditorPage() {
       if (opts?.auto) setLogOpen(true);
       return false;
     } catch (err) {
+      if (branchIdRef.current !== startedOn) return false;
       setStatus("err");
       setLog((prev) => `${prev}\n${err instanceof Error ? err.message : "Compile failed"}`);
       if (opts?.auto) setLogOpen(true);
       return false;
     } finally {
       compileLock.current = false;
+      if (branchIdRef.current !== startedOn) {
+        void runCompileRef.current({ auto: true });
+      }
     }
-  }, [id, refreshTree, canCompile, branchId, branchLabel]);
+  }, [id, refreshTree, canCompile, branchLabel]);
 
   const runCompileRef = useRef(runCompile);
   runCompileRef.current = runCompile;
@@ -831,7 +1033,9 @@ export function EditorPage() {
       if (saveLock.current) return;
       saveLock.current = true;
 
-      const wantCompile = opts?.compile === true && config?.latex.autoCompile !== false;
+      // Explicit save (toolbar / ⌘S) always compiles when requested — Overleaf-style.
+      // Autosave passes compile: false so background flushes stay light.
+      const wantCompile = opts?.compile === true && canCompile;
       setStatus("saving");
       if (!opts?.silent) setError(null);
 
@@ -916,6 +1120,7 @@ export function EditorPage() {
       liveContent,
       config,
       runCompile,
+      canCompile,
       editMode,
       fileReady,
       collabText,
@@ -992,6 +1197,57 @@ export function EditorPage() {
   useEffect(() => {
     if (dirty) setStatus((s) => (s === "compiling" || s === "saving" ? s : "dirty"));
   }, [dirty]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
+
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden" && dirty) {
+        void save({ compile: false, silent: true });
+      }
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, [dirty, save]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (toolbarMoreOpen) {
+        setToolbarMoreOpen(false);
+        return;
+      }
+      if (commentsOpen) {
+        setCommentsOpen(false);
+        return;
+      }
+      if (aiReviewOpen) {
+        setAiReviewOpen(false);
+        return;
+      }
+      if (shareOpen) {
+        setShareOpen(false);
+        return;
+      }
+      if (aiLinksOpen) {
+        setAiLinksOpen(false);
+        return;
+      }
+      if (mergeOpen) {
+        setMergeOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toolbarMoreOpen, commentsOpen, aiReviewOpen, shareOpen, aiLinksOpen, mergeOpen]);
 
   // After collab/file load finishes, re-issue any pending SyncTeX jump for this path
   useEffect(() => {
@@ -1129,6 +1385,7 @@ export function EditorPage() {
       setForceTextPath(null);
       setForceBase64Path(null);
       setJumpTo(dest);
+      if (window.matchMedia("(max-width: 720px)").matches) setMobilePane("source");
       if (anchor.file !== activePathRef.current) {
         setActivePath(anchor.file);
       }
@@ -1170,6 +1427,86 @@ export function EditorPage() {
     [id, branchId],
   );
 
+  const activateReviewHunk = useCallback(
+    async (entry: { collab: AiReviewCollaborator; hunk: AiReviewHunk }) => {
+      if (!id) return;
+      try {
+        if (entry.collab.branchId !== branchId) {
+          const view = await checkoutProjectTimeline(id, { branchId: entry.collab.branchId, nodeId: null });
+          onTimelineChange(view);
+        }
+        setAiActiveId(entry.hunk.id);
+        jumpToAnchor(hunkAnchor(entry.hunk));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not open AI suggestion");
+      }
+    },
+    [id, branchId, onTimelineChange, jumpToAnchor],
+  );
+
+  useEffect(() => {
+    if (!aiFocusNonce || !aiFocusBranchId) return;
+    if (aiFocusNonce === consumedAiFocusNonce.current) return;
+    const c = aiCollabs.find((x) => x.branchId === aiFocusBranchId);
+    if (!c) return;
+    const hunk = flattenReviewHunks([c])[0]?.hunk;
+    if (!hunk) return;
+    consumedAiFocusNonce.current = aiFocusNonce;
+    void activateReviewHunk({ collab: c, hunk });
+  }, [aiFocusNonce, aiFocusBranchId, aiCollabs, activateReviewHunk]);
+
+  const beginAiReview = useCallback(
+    async (opts?: { list?: boolean }) => {
+      closeOverlappingChrome("ai");
+      if (narrow) {
+        setMobilePane("source");
+        setAiReviewOpen(Boolean(opts?.list));
+      } else {
+        setAiReviewOpen(true);
+      }
+      const all = flattenReviewHunks(aiCollabsRef.current);
+      const local = all.filter((x) => x.collab.branchId === branchId);
+      const pick = (local.length ? local : all)[0];
+      if (!pick) {
+        setAiReviewOpen(true);
+        return;
+      }
+      if (opts?.list && narrow) return;
+      await activateReviewHunk(pick);
+    },
+    [narrow, branchId, activateReviewHunk, closeOverlappingChrome],
+  );
+
+  const runPopupReview = useCallback(
+    async (action: "accept" | "reject") => {
+      if (!id || !activeAiHit) return;
+      const oldId = activeAiHit.hunk.id;
+      const oldList = flattenReviewHunks(aiCollabsRef.current);
+      const oldIdx = oldList.findIndex((x) => x.hunk.id === oldId);
+      setAiPopupBusy(true);
+      try {
+        const body = { hunkId: oldId };
+        if (action === "accept") await acceptAiReview(id, activeAiHit.collab.aiId, body);
+        else await rejectAiReview(id, activeAiHit.collab.aiId, body);
+        const data = await listProjectAiReview(id);
+        setAiCollabs(data.collaborators);
+        setAiReviewCount(data.hunkCount);
+        const nextList = flattenReviewHunks(data.collaborators);
+        if (nextList.length === 0) {
+          setAiActiveId(null);
+          return;
+        }
+        const next = nextList[Math.min(Math.max(0, oldIdx), nextList.length - 1)] ?? nextList[0];
+        await activateReviewHunk(next);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : action === "accept" ? "Could not keep that suggestion" : "Could not dismiss that suggestion");
+      } finally {
+        setAiPopupBusy(false);
+      }
+    },
+    [id, activeAiHit, activateReviewHunk],
+  );
+
   const onReverseSearch = useCallback(
     async (page: number, x: number, y: number) => {
       if (!id) return;
@@ -1191,6 +1528,7 @@ export function EditorPage() {
         setForceTextPath(null);
         setForceBase64Path(null);
         setJumpTo(dest);
+        if (window.matchMedia("(max-width: 720px)").matches) setMobilePane("source");
         if (target !== activePathRef.current) {
           setActivePath(target);
         }
@@ -1221,13 +1559,14 @@ export function EditorPage() {
         };
         jumpToAnchor(anchor);
         setCommentDraft({ anchor, hint: `PDF p.${page}` });
+        closeOverlappingChrome("comments");
         setCommentsOpen(true);
         showSyncToast(`Comment @ ${target}:${hit.line}`);
       } catch {
         showSyncToast("No SyncTeX match — recompile?");
       }
     },
-    [id, branchId, jumpToAnchor, normalizeSynctexPath, showSyncToast],
+    [id, branchId, jumpToAnchor, normalizeSynctexPath, showSyncToast, closeOverlappingChrome],
   );
 
   const onRequestComment = useCallback(
@@ -1242,9 +1581,10 @@ export function EditorPage() {
         quote: sel.quote || undefined,
       };
       setCommentDraft({ anchor, hint: sel.quote || undefined });
+      closeOverlappingChrome("comments");
       setCommentsOpen(true);
     },
-    [],
+    [closeOverlappingChrome],
   );
 
   const commentMarks = useMemo(() => {
@@ -1292,6 +1632,7 @@ export function EditorPage() {
     setForceTextPath(null);
     setForceBase64Path(null);
     setActivePath(path);
+    if (window.matchMedia("(max-width: 720px)").matches) setMobilePane("source");
   }, []);
 
   const onNewFile = async (dir?: string) => {
@@ -1457,7 +1798,7 @@ export function EditorPage() {
   }
 
   return (
-    <div className="editor-page">
+    <div className={`editor-page${narrow ? " is-narrow" : ""}`}>
       <div className="editor-toolbar">
         <div className="toolbar-cluster">
           <img className="toolbar-logo" src="/logo.png" alt="OpenLeaf logo" />
@@ -1473,7 +1814,7 @@ export function EditorPage() {
           <span className="toolbar-project-name" title={project?.id ?? id}>
             {project?.id ?? id}
           </span>
-          <div className="toolbar-meta">
+          <div className="toolbar-meta toolbar-wide-only">
             <span
               className={`status-pill ${
                 status === "saving" || status === "compiling"
@@ -1497,7 +1838,7 @@ export function EditorPage() {
           </div>
         </div>
 
-        <div className="toolbar-cluster toolbar-collab">
+        <div className="toolbar-cluster toolbar-collab toolbar-wide-only">
           <div
             className="presence-strip"
             title={
@@ -1563,43 +1904,38 @@ export function EditorPage() {
         </div>
 
         <div className="toolbar-actions">
-          {!isGuest && (
-            <>
-              {shareActive ? (
-                <button
-                  type="button"
-                  className={`btn share-timer-chip${shareUrgent ? " is-urgent" : ""}`}
-                  onClick={() => setShareOpen(true)}
-                  title={
-                    shareExpiresAt === null
-                      ? "Session has no automatic expiry — click to manage"
-                      : shareExpiresAt
-                        ? `Session ends ${new Date(shareExpiresAt).toLocaleString()} — click to extend`
-                        : "Live share session — click to manage"
-                  }
-                >
-                  <span className="share-timer-dot" aria-hidden>
-                    ●
-                  </span>
-                  {shareTimerLabel}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-quiet"
-                  onClick={() => setShareOpen(true)}
-                  title="Create a temporary public link"
-                >
-                  Share
-                </button>
-              )}
-            </>
+          {!isGuest && shareActive && (
+            <button
+              type="button"
+              className={`btn share-timer-chip${shareUrgent ? " is-urgent" : ""}`}
+              onClick={() => {
+                closeOverlappingChrome("share");
+                setShareOpen(true);
+              }}
+              title={
+                shareCount > 1
+                  ? `${shareCount} live user links — click to manage`
+                  : shareExpiresAt === null
+                    ? "Session has no automatic expiry — click to manage"
+                    : shareExpiresAt
+                      ? `Session ends ${new Date(shareExpiresAt).toLocaleString()} — click to extend`
+                      : "Live share session — click to manage"
+              }
+            >
+              <span className="share-timer-dot" aria-hidden>
+                ●
+              </span>
+              {shareCount > 1 ? `Live · ${shareCount}` : shareTimerLabel}
+            </button>
           )}
           {canHistory && (
             <button
               type="button"
-              className="btn btn-quiet"
-              onClick={() => setHistoryOpen(true)}
+              className={`btn btn-quiet${historyOpen ? " is-active" : ""}`}
+              onClick={() => {
+                closeOverlappingChrome("history");
+                setHistoryOpen(true);
+              }}
               title={lastCommit ? `${branchLabel}@${lastCommit}` : branchLabel}
             >
               Timeline
@@ -1609,7 +1945,10 @@ export function EditorPage() {
             <button
               type="button"
               className="btn btn-primary toolbar-merge-btn"
-              onClick={() => setMergeOpen(true)}
+              onClick={() => {
+                closeOverlappingChrome();
+                setMergeOpen(true);
+              }}
               title="Merge in progress — Hide only closes the panel; Abort cancels the merge"
             >
               {mergeSession.conflicts.some((c) => !c.resolved)
@@ -1645,87 +1984,256 @@ export function EditorPage() {
           {!readOnly && timelineCanEdit && (
             <button
               type="button"
-              className={dirty || status === "saving" ? "btn btn-primary" : "btn btn-quiet"}
+              className={
+                dirty || status === "saving" || status === "compiling"
+                  ? "btn btn-primary"
+                  : "btn btn-quiet"
+              }
               onClick={() => void save({ compile: true })}
               disabled={
                 !activePath ||
                 !fileReady ||
                 editMode === "binary" ||
                 tooLargeBytes != null ||
-                status === "saving"
+                status === "saving" ||
+                status === "compiling"
               }
-              title="Save now (autosave is already on). Also recompiles when auto-compile is enabled."
+              title={
+                canCompile
+                  ? "Save and recompile (⌘S / Ctrl+S). Autosave still runs in the background without compiling."
+                  : "Save now (⌘S / Ctrl+S). Autosave is already on."
+              }
             >
-              {status === "saving" ? "Saving…" : collabText ? "Save & sync" : "Save"}
+              {status === "compiling"
+                ? "Compiling…"
+                : status === "saving"
+                  ? "Saving…"
+                  : canCompile
+                    ? "Recompile"
+                    : collabText
+                      ? "Save & sync"
+                      : "Save"}
             </button>
           )}
-          {canCompile && (
+          {readOnly && canCompile && (
             <button
               type="button"
               className="btn btn-primary"
               onClick={() => void runCompile()}
               disabled={status === "compiling"}
+              title="Recompile the current project"
             >
-              {status === "compiling" ? "Compiling…" : "Compile"}
+              {status === "compiling" ? "Compiling…" : "Recompile"}
             </button>
           )}
 
-          <button
-            type="button"
-            className={`btn btn-quiet toolbar-comments${openCommentCount ? " has-open" : ""}${commentsOpen ? " is-active" : ""}`}
-            onClick={() => {
-              setHistoryOpen(false);
-              setCommentsOpen(true);
-            }}
-            title="Comments — select source text then ⌘⌥M / Ctrl+Alt+M, or Shift+click the PDF"
-          >
-            Comments
-            {openCommentCount > 0 ? <span className="toolbar-comments-badge">{openCommentCount}</span> : null}
-          </button>
-
-          <div className="toolbar-divider" aria-hidden />
-
-          <ThemePicker compact />
-
-          {canDownload && (
-            <div className="toolbar-more" ref={toolbarMoreRef}>
-              <button
-                type="button"
-                className="btn btn-ghost btn-icon toolbar-download-btn"
-                aria-expanded={toolbarMoreOpen}
-                aria-haspopup="menu"
-                title="Download PDF or project ZIP"
-                aria-label="Download"
-                onClick={() => setToolbarMoreOpen((v) => !v)}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                  <path d="M12 3v12" strokeLinecap="round" />
-                  <path d="M7 11l5 5 5-5" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M5 21h14" strokeLinecap="round" />
-                </svg>
-              </button>
-              {toolbarMoreOpen && (
-                <div className="toolbar-menu" role="menu">
-                  <a
-                    role="menuitem"
-                    href={downloadUrl(id, "pdf", branchId)}
-                    download={`${id}.pdf`}
-                    onClick={() => setToolbarMoreOpen(false)}
-                  >
-                    <span>Download PDF</span>
-                  </a>
-                  <a
-                    role="menuitem"
-                    href={downloadUrl(id, "zip", branchId)}
-                    download={`${id}.zip`}
-                    onClick={() => setToolbarMoreOpen(false)}
-                  >
-                    <span>Download ZIP</span>
-                  </a>
-                </div>
-              )}
-            </div>
+          {openCommentCount > 0 && (
+            <button
+              type="button"
+              className={`btn btn-quiet toolbar-comments has-open${commentsOpen ? " is-active" : ""}`}
+              onClick={() => {
+                closeOverlappingChrome("comments");
+                setCommentsOpen(true);
+              }}
+              title="Open comments"
+            >
+              Comments
+              <span className="toolbar-comments-badge">{openCommentCount}</span>
+            </button>
           )}
+
+          {!isGuest && aiReviewCount > 0 && (
+            <button
+              type="button"
+              className={`btn btn-quiet toolbar-comments toolbar-ai-review has-open${aiReviewOpen || (narrow && aiActiveId) ? " is-active" : ""}`}
+              onClick={() => {
+                void beginAiReview();
+              }}
+              title="Review AI wording in the manuscript — Accept keeps it, Dismiss restores it"
+            >
+              AI
+              <span className="toolbar-comments-badge">{aiReviewCount}</span>
+            </button>
+          )}
+
+          <div className="toolbar-more" ref={toolbarMoreRef}>
+            <button
+              ref={toolbarMoreBtnRef}
+              type="button"
+              className="btn btn-ghost btn-icon toolbar-download-btn"
+              aria-expanded={toolbarMoreOpen}
+              aria-haspopup="menu"
+              title="More actions"
+              aria-label="More actions"
+              onClick={() => setToolbarMoreOpen((v) => !v)}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none" />
+                <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+                <circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+            {toolbarMoreOpen &&
+              toolbarMenuBox &&
+              createPortal(
+              <div
+                ref={toolbarMenuRef}
+                className="toolbar-menu is-floating"
+                role="menu"
+                style={{
+                  top: toolbarMenuBox.top,
+                  right: toolbarMenuBox.right,
+                  maxHeight: toolbarMenuBox.maxHeight,
+                }}
+              >
+                {narrow && isGuest && guest && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setToolbarMoreOpen(false);
+                      void guestLogout().finally(() => void refreshSession());
+                    }}
+                  >
+                    Leave session
+                    <span className="toolbar-menu-hint">{guest.guest.name}</span>
+                  </button>
+                )}
+                {narrow && !isGuest && collab.identities.length > 0 && (
+                  <label className="identity-picker toolbar-menu-identity">
+                    <span className="identity-picker-label">You</span>
+                    <select
+                      value={collab.identity?.id ?? ""}
+                      onChange={(e) => collab.setIdentityId(e.target.value)}
+                      aria-label="Select identity"
+                    >
+                      {collab.identities.map((ident) => (
+                        <option key={ident.id} value={ident.id}>
+                          {ident.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {narrow && (!isGuest || !readOnly) && timelineCanEdit && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setToolbarMoreOpen(false);
+                      window.dispatchEvent(new CustomEvent("openleaf:request-comment"));
+                    }}
+                  >
+                    Comment on selection
+                  </button>
+                )}
+                {narrow && (isGuest || collab.identities.length > 0) && <div className="toolbar-menu-sep" />}
+                {!isGuest && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setToolbarMoreOpen(false);
+                      closeOverlappingChrome("share");
+                      setShareOpen(true);
+                    }}
+                  >
+                    Share
+                    {shareActive ? <span className="toolbar-menu-hint">Live</span> : null}
+                  </button>
+                )}
+                {(!isGuest || !readOnly) && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setToolbarMoreOpen(false);
+                      closeOverlappingChrome("aiLinks");
+                      setAiLinksOpen(true);
+                    }}
+                  >
+                    AI links
+                    {aiLinkCount > 0 ? <span className="toolbar-menu-hint">{aiLinkCount}</span> : null}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setToolbarMoreOpen(false);
+                    closeOverlappingChrome("comments");
+                    setCommentsOpen(true);
+                  }}
+                >
+                  Comments
+                  {openCommentCount > 0 ? <span className="toolbar-menu-hint">{openCommentCount}</span> : null}
+                </button>
+                {!isGuest && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setToolbarMoreOpen(false);
+                      void beginAiReview();
+                    }}
+                  >
+                    AI suggestions
+                    {aiReviewCount > 0 ? <span className="toolbar-menu-hint">{aiReviewCount}</span> : null}
+                  </button>
+                )}
+                {narrow && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setToolbarMoreOpen(false);
+                      setLogOpen(true);
+                    }}
+                  >
+                    Compile log
+                  </button>
+                )}
+                <div className="toolbar-menu-sep" />
+                <div className="toolbar-menu-theme" onMouseDown={(e) => e.stopPropagation()}>
+                  <ThemePicker compact />
+                </div>
+                {isRemoteHost && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setToolbarMoreOpen(false);
+                      void hostLogout().finally(() => void refreshSession());
+                    }}
+                  >
+                    Sign out
+                  </button>
+                )}
+                {canDownload && (
+                  <>
+                    <div className="toolbar-menu-sep" />
+                    <a
+                      role="menuitem"
+                      href={downloadUrl(id, "pdf", branchId)}
+                      download={`${id}.pdf`}
+                      onClick={() => setToolbarMoreOpen(false)}
+                    >
+                      <span>Download PDF</span>
+                    </a>
+                    <a
+                      role="menuitem"
+                      href={downloadUrl(id, "zip", branchId)}
+                      download={`${id}.zip`}
+                      onClick={() => setToolbarMoreOpen(false)}
+                    >
+                      <span>Download ZIP</span>
+                    </a>
+                  </>
+                )}
+              </div>,
+              document.body,
+            )}
+          </div>
         </div>
       </div>
 
@@ -1750,6 +2258,23 @@ export function EditorPage() {
         />
       )}
 
+      {(!isGuest || !readOnly) && (
+        <AiLinkPanel
+          projectId={id}
+          open={aiLinksOpen}
+          onClose={() => setAiLinksOpen(false)}
+          branchId={branchId}
+          branchName={branchLabel}
+          guestBoundBranchId={guestBranchId}
+          guestBoundBranchName={guest?.share.branchName ?? null}
+          guestId={guest?.guest.id ?? null}
+          canEditLeaf={timelineCanEdit && !readOnly}
+          onTimelineChange={onTimelineChange}
+          onCountChange={setAiLinkCount}
+          onOpenAiReview={() => void beginAiReview()}
+        />
+      )}
+
       <BranchTreePanel
         projectId={id}
         identityId={collab.identity?.id}
@@ -1762,6 +2287,10 @@ export function EditorPage() {
         guestBranchId={guestBranchId}
         leavesVersion={collab.leavesVersion}
         onHighlightSince={config?.git?.enabled === false ? undefined : (hash) => onHighlightSinceCommit(hash)}
+        onOpenNode={(node, branch) => {
+          if (branch.headNodeId !== node.id) return;
+          reopenAiLeafNotifications(branch);
+        }}
         onMergeStarted={(session) => {
           setMergeSession(session);
           setMergeOpen(true);
@@ -1803,37 +2332,90 @@ export function EditorPage() {
         onJump={jumpToAnchor}
         onThreadsChange={setCommentThreads}
         focusThreadId={focusCommentId}
+        canDeleteThread={isGuest ? (t) => t.authorId === guest?.guest.id : undefined}
       />
 
-      <div className="workspace" ref={workspaceRef}>
-        <div className="split-row" style={{ flex: 1, minHeight: 0 }}>
-          <div className="pane pane-tree" style={{ flex: `0 0 ${treeWidth}px` }}>
-            <div className="pane-title">Files</div>
-            <FileTree
-              nodes={tree}
-              activePath={activePath}
-              onOpen={openPath}
-              onNewFile={(dir) => void onNewFile(dir)}
-              onNewFolder={(dir) => void onNewFolder(dir)}
-              onUpload={(files, dir) => void onUpload(files, dir)}
-              onDelete={(path) => void onDelete(path)}
-              onRename={(path) => void onRename(path)}
-              onMove={(from, toDir) => {
-                if (!readOnly) void onMove(from, toDir);
-              }}
-              canMutateActive={Boolean(activePath)}
-              readOnly={readOnly || !timelineCanEdit}
-              fileChanges={fileChangeMap}
-            />
-          </div>
+      {!isGuest && (
+        <AiReviewPanel
+          projectId={id}
+          open={aiReviewOpen}
+          onClose={() => setAiReviewOpen(false)}
+          currentBranchId={branchId}
+          reviewVersion={collab.aiReviewVersion}
+          activeHunkId={aiActiveId}
+          onActiveHunkIdChange={setAiActiveId}
+          onCollaboratorsChange={onAiCollabsChange}
+          onCountChange={setAiReviewCount}
+          onTimelineChange={onTimelineChange}
+          onJump={(path, line, column) => jumpToAnchor({ file: path, line, column: column ?? 1 })}
+          onPickedHunk={narrow ? () => setAiReviewOpen(false) : undefined}
+          variant={narrow ? "sheet" : "drawer"}
+          focusBranchId={aiFocusBranchId}
+          focusNonce={aiFocusNonce}
+        />
+      )}
+
+      <div
+        className={`workspace${narrow ? " is-narrow" : ""}`}
+        data-mobile-pane={narrow ? mobilePane : undefined}
+        ref={workspaceRef}
+      >
+        <div className="split-row workspace-split" style={{ flex: 1, minHeight: 0 }}>
           <div
-            className={`split-handle${treeDragging ? " active" : ""}`}
-            onMouseDown={() => setTreeDragging(true)}
-            role="separator"
-            aria-orientation="vertical"
-          />
-          <div className="pane" style={{ flex: 1, minWidth: 0 }}>
+            className={`pane pane-tree${treeCollapsed && !narrow ? " is-collapsed" : ""}`}
+            style={{ flex: `0 0 ${narrow ? "100%" : treeCollapsed ? "40px" : `${treeWidth}px`}` }}
+          >
+            <div className="pane-title pane-title-row">
+              {(!treeCollapsed || narrow) && <span>Files</span>}
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon tree-collapse-btn toolbar-wide-only"
+                onClick={toggleTreeCollapsed}
+                title={treeCollapsed ? "Show file explorer" : "Hide file explorer"}
+                aria-label={treeCollapsed ? "Show file explorer" : "Hide file explorer"}
+                aria-expanded={!treeCollapsed}
+              >
+                {treeCollapsed ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M15 6l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </button>
+            </div>
+            {(!treeCollapsed || narrow) && (
+              <FileTree
+                nodes={tree}
+                activePath={activePath}
+                onOpen={openPath}
+                onNewFile={(dir) => void onNewFile(dir)}
+                onNewFolder={(dir) => void onNewFolder(dir)}
+                onUpload={(files, dir) => void onUpload(files, dir)}
+                onDelete={(path) => void onDelete(path)}
+                onRename={(path) => void onRename(path)}
+                onMove={(from, toDir) => {
+                  if (!readOnly) void onMove(from, toDir);
+                }}
+                canMutateActive={Boolean(activePath)}
+                readOnly={readOnly || !timelineCanEdit}
+                fileChanges={fileChangeMap}
+              />
+            )}
+          </div>
+          {(!treeCollapsed || narrow) && (
+            <div
+              className={`split-handle workspace-tree-handle${treeDragging ? " active" : ""}`}
+              onPointerDown={() => setTreeDragging(true)}
+              role="separator"
+              aria-orientation="vertical"
+            />
+          )}
+          <div className="pane pane-main" style={{ flex: 1, minWidth: 0 }}>
             <SplitPane
+              className="split-editor"
               storageKey={`openleaf.split.${id}`}
               initialLeftRatio={0.52}
               left={
@@ -1884,7 +2466,7 @@ export function EditorPage() {
                         {!readOnly && timelineCanEdit && !viewingDeletedFile && activePath && (
                           <button
                             type="button"
-                            className="btn btn-ghost pane-comment-btn"
+                            className="btn btn-ghost pane-comment-btn toolbar-wide-only"
                             title="Select text in the editor, then click — or press ⌘⌥M / Ctrl+Alt+M"
                             onClick={() => {
                               window.dispatchEvent(new CustomEvent("openleaf:request-comment"));
@@ -1898,7 +2480,7 @@ export function EditorPage() {
                         path={activePath}
                         value={content}
                         onChange={setContent}
-                        onSave={() => void save({ compile: false })}
+                        onSave={() => void save({ compile: true })}
                         jumpTo={jumpTo}
                         citations={citations}
                         labels={labels}
@@ -1913,6 +2495,40 @@ export function EditorPage() {
                           setCommentsOpen(true);
                         }}
                         changeMarks={changeMarks}
+                        suggestionMarks={suggestionMarks}
+                        activeSuggestionId={aiActiveId}
+                        onSelectSuggestion={setAiActiveId}
+                        suggestionDock={narrow}
+                        suggestionPopup={
+                          activeAiHit && activeAiHit.collab.branchId === branchId ? (
+                            <AiSuggestionCard
+                              key={`${activeAiHit.hunk.id}-${aiFocusNonce}`}
+                              hunk={activeAiHit.hunk}
+                              compact
+                              busy={aiPopupBusy}
+                              onAccept={() => void runPopupReview("accept")}
+                              onReject={() => void runPopupReview("reject")}
+                              nav={
+                                narrow && reviewNavIndex >= 0
+                                  ? {
+                                      index: reviewNavIndex,
+                                      total: reviewHunks.length,
+                                      onPrev: () => {
+                                        const e = reviewHunks[reviewNavIndex - 1];
+                                        if (e) void activateReviewHunk(e);
+                                      },
+                                      onNext: () => {
+                                        const e = reviewHunks[reviewNavIndex + 1];
+                                        if (e) void activateReviewHunk(e);
+                                      },
+                                      onList: () => setAiReviewOpen(true),
+                                      onClose: () => setAiActiveId(null),
+                                    }
+                                  : undefined
+                              }
+                            />
+                          ) : null
+                        }
                       />
                     </>
                   )}
@@ -1958,7 +2574,40 @@ export function EditorPage() {
             />
           </div>
         </div>
-        <CompileLog log={log} open={logOpen} onToggle={() => setLogOpen((v) => !v)} height={180} />
+        {(!narrow || logOpen || status === "err") && (
+          <CompileLog
+            className={narrow ? "is-overlay" : undefined}
+            log={log}
+            open={logOpen}
+            onToggle={() => setLogOpen((v) => !v)}
+            height={narrow ? 140 : 180}
+          />
+        )}
+        {narrow && (
+          <nav className="mobile-pane-switcher" aria-label="Editor views">
+            <button
+              type="button"
+              className={mobilePane === "files" ? "is-active" : ""}
+              onClick={() => setMobilePane("files")}
+            >
+              Files
+            </button>
+            <button
+              type="button"
+              className={mobilePane === "source" ? "is-active" : ""}
+              onClick={() => setMobilePane("source")}
+            >
+              Source
+            </button>
+            <button
+              type="button"
+              className={mobilePane === "preview" ? "is-active" : ""}
+              onClick={() => setMobilePane("preview")}
+            >
+              Preview
+            </button>
+          </nav>
+        )}
       </div>
 
       <CompareBaselinePicker
