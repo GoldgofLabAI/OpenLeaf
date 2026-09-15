@@ -11,6 +11,7 @@ import {
   formatUnifiedDiff,
   hunkNewRanges,
   inlineDiff,
+  mergeInlineTokens,
   newSide,
   oldSide,
   parseUnifiedDiff,
@@ -208,6 +209,21 @@ describe("hunks + apply", () => {
     assert.equal(ranges.length, 1);
     assert.equal(ranges[0]!.startLine, 1);
     assert.equal(ranges[0]!.endColumn - ranges[0]!.startColumn, "slow".length);
+  });
+
+  it("merges adjacent same-kind inline tokens", () => {
+    const merged = mergeInlineTokens([
+      { kind: "eq", text: "a" },
+      { kind: "eq", text: "b" },
+      { kind: "del", text: "x" },
+      { kind: "del", text: "y" },
+      { kind: "add", text: "z" },
+    ]);
+    assert.deepEqual(merged, [
+      { kind: "eq", text: "ab" },
+      { kind: "del", text: "xy" },
+      { kind: "add", text: "z" },
+    ]);
   });
 });
 

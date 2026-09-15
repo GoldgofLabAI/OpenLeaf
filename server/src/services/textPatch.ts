@@ -407,6 +407,17 @@ export function inlineDiff(oldText: string, newText: string): InlineToken[] {
   }));
 }
 
+export function mergeInlineTokens(tokens: InlineToken[]): InlineToken[] {
+  const out: InlineToken[] = [];
+  for (const t of tokens) {
+    if (!t.text) continue;
+    const last = out[out.length - 1];
+    if (last && last.kind === t.kind) last.text += t.text;
+    else out.push({ kind: t.kind, text: t.text });
+  }
+  return out;
+}
+
 export function condenseInline(tokens: InlineToken[], maxEqChars = 36): InlineToken[] {
   const out: InlineToken[] = [];
   for (let i = 0; i < tokens.length; i += 1) {

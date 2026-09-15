@@ -9,9 +9,8 @@ import {
   hunkDeletions,
   hunkNewRanges,
   inlineDiff,
-  newSide,
+  mergeInlineTokens,
   normalizeLf,
-  oldSide,
   phraseFrom,
   toCrlf,
   type InlineRange,
@@ -112,8 +111,18 @@ function hunkId(path: string, h: TextHunk): string {
   return `${path}#${hashHunk(path, h)}`;
 }
 
+function changedSides(h: TextHunk): { before: string; after: string } {
+  return {
+    before: h.lines.filter((l) => l.kind === "del").map((l) => l.text).join("\n"),
+    after: h.lines.filter((l) => l.kind === "add").map((l) => l.text).join("\n"),
+  };
+}
+
 function toView(path: string, h: TextHunk): ReviewHunkView {
-  const tokens = inlineDiff(oldSide(h).join("\n"), newSide(h).join("\n"));
+  // Diff only added/removed lines — including hunk context lets Myers match
+  // glue words ("the", "on") across rewritten sentences and produces a soup.
+  const { before, after } = changedSides(h);
+  const tokens = mergeInlineTokens(inlineDiff(before, after));
   const phraseBefore = phraseFrom(tokens, "del");
   const phraseAfter = phraseFrom(tokens, "add");
   const kind: ReviewHunkView["kind"] =
@@ -129,7 +138,7 @@ function toView(path: string, h: TextHunk): ReviewHunkView {
     additions: hunkAdditions(h),
     deletions: hunkDeletions(h),
     lines: h.lines,
-    inline: condenseInline(tokens),
+    inline: mergeInlineTokens(condenseInline(tokens)),
     ranges:
       ranges.length > 0
         ? ranges

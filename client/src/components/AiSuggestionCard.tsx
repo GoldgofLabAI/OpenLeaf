@@ -1,4 +1,5 @@
 import type { AiReviewHunk, AiReviewInline } from "../api/share";
+import { previewFromHunk } from "./aiSuggestPreview";
 
 type Props = {
   hunk: AiReviewHunk;
@@ -44,6 +45,17 @@ function verb(kind: "replace" | "insert" | "delete"): string {
   return "Replace";
 }
 
+function renderTokens(tokens: AiReviewInline[]) {
+  if (tokens.length === 0) {
+    return <span className="ai-suggest-eq">Trailing newline change</span>;
+  }
+  return tokens.map((t, i) => (
+    <span key={i} className={`ai-suggest-tok is-${t.kind}`}>
+      {t.text}
+    </span>
+  ));
+}
+
 export function AiSuggestionCard({
   hunk,
   selected = false,
@@ -55,7 +67,10 @@ export function AiSuggestionCard({
   nav,
 }: Props) {
   const kind = kindOf(hunk);
-  const tokens = fallbackInline(hunk);
+  const preview = previewFromHunk({
+    lines: hunk.lines,
+    inline: fallbackInline(hunk),
+  });
   const line = Math.max(1, hunk.newStart || hunk.oldStart || 1);
 
   return (
@@ -94,7 +109,7 @@ export function AiSuggestionCard({
           </span>
         </header>
       )}
-      {( !compact || nav) && (
+      {(!compact || nav) && (
         <header className="ai-suggest-card-meta">
           <span className="ai-suggest-verb">{verb(kind)}</span>
           <span className="ai-suggest-loc">
@@ -102,17 +117,29 @@ export function AiSuggestionCard({
           </span>
         </header>
       )}
-      <p className="ai-suggest-copy">
-        {tokens.length === 0 ? (
-          <span className="ai-suggest-eq">Trailing newline change</span>
-        ) : (
-          tokens.map((t, i) => (
-            <span key={i} className={`ai-suggest-tok is-${t.kind}`}>
-              {t.text}
-            </span>
-          ))
-        )}
-      </p>
+      {preview.mode === "inline" ? (
+        <p className="ai-suggest-copy">{renderTokens(preview.tokens)}</p>
+      ) : (
+        <div className="ai-suggest-compare">
+          {preview.before ? (
+            <figure className="ai-suggest-block is-del">
+              <figcaption>Removed</figcaption>
+              <pre>{preview.before}</pre>
+            </figure>
+          ) : null}
+          {preview.after ? (
+            <figure className="ai-suggest-block is-add">
+              <figcaption>Added</figcaption>
+              <pre>{preview.after}</pre>
+            </figure>
+          ) : null}
+          {!preview.before && !preview.after ? (
+            <p className="ai-suggest-copy">
+              <span className="ai-suggest-eq">Trailing newline change</span>
+            </p>
+          ) : null}
+        </div>
+      )}
       <div className="ai-suggest-actions">
         <button
           type="button"
