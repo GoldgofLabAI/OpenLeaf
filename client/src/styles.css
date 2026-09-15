@@ -1855,6 +1855,8 @@ a {
   background: var(--card, var(--glass));
   box-shadow: 0 1px 0 color-mix(in srgb, var(--ink) 4%, transparent);
   cursor: pointer;
+  container-type: inline-size;
+  container-name: ai-suggest;
 }
 
 .ai-suggest-card:hover {
@@ -1901,17 +1903,16 @@ a {
 
 .ai-suggest-copy {
   margin: 0;
-  font-size: 0.9rem;
-  line-height: 1.5;
+  font-size: 0.95rem;
+  line-height: 1.55;
   letter-spacing: -0.011em;
   color: var(--ink);
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
 
-.ai-suggest-card.is-compact .ai-suggest-copy,
-.ai-suggest-card.is-compact .ai-suggest-compare {
-  max-height: 14rem;
+.ai-suggest-card.is-compact .ai-suggest-copy {
+  max-height: 10rem;
   overflow: auto;
 }
 
@@ -1921,107 +1922,129 @@ a {
 
 .ai-suggest-tok.is-del,
 .ai-suggest-tok.is-add {
-  padding: 0 0.12em;
+  padding: 0 0.14em;
   border-radius: 3px;
   box-decoration-break: clone;
 }
 
-.ai-suggest-tok.is-del {
+/* Google Docs / Grammarly: strike the old phrase, underline the new one. */
+.ai-suggest-copy.is-gdocs .ai-suggest-tok.is-del {
   color: #b42318;
   text-decoration: line-through;
-  text-decoration-thickness: 1.5px;
+  text-decoration-thickness: 1.6px;
   background: rgba(207, 34, 46, 0.1);
 }
 
-.ai-suggest-tok.is-add {
+.ai-suggest-copy.is-gdocs .ai-suggest-tok.is-add {
   color: #067647;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
   background: rgba(46, 160, 67, 0.14);
 }
 
-/* Keep swapped words from colliding: ~~remains~~**is** → remains is */
 .ai-suggest-tok.is-del + .ai-suggest-tok.is-add,
 .ai-suggest-tok.is-add + .ai-suggest-tok.is-del {
-  margin-left: 0.2em;
+  margin-left: 0.18em;
 }
 
-.ai-suggest-compare {
+.ai-suggest-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: stretch;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-elevated, var(--card, var(--glass)));
+}
+
+.ai-suggest-pane {
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
 }
 
-.ai-suggest-block {
+.ai-suggest-pane.is-after {
+  border-left: 1px solid var(--line);
+}
+
+.ai-suggest-pane-label {
   margin: 0;
-  padding: 0.4rem 0.55rem 0.5rem;
-  border-radius: 8px;
-  border: 1px solid transparent;
-}
-
-.ai-suggest-block figcaption {
-  font-size: 0.68rem;
-  font-weight: 650;
-  letter-spacing: 0.04em;
+  padding: 0.32rem 0.6rem;
+  font: inherit;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  margin-bottom: 0.28rem;
+  color: var(--ink-muted);
+  background: var(--hover-wash);
+  border-bottom: 1px solid var(--line);
 }
 
-.ai-suggest-block pre {
+.ai-suggest-pane-body {
   margin: 0;
+  padding: 0.55rem 0.65rem 0.7rem;
+  max-height: 16rem;
+  overflow: auto;
   font-family: var(--font);
   font-size: 0.84rem;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  color: var(--ink);
 }
 
-.ai-suggest-block.is-del {
-  background: rgba(207, 34, 46, 0.1);
-  border-color: rgba(207, 34, 46, 0.22);
+.ai-suggest-card.is-compact .ai-suggest-pane-body {
+  max-height: 12rem;
 }
 
-.ai-suggest-block.is-del figcaption,
-.ai-suggest-block.is-del pre {
-  color: #b42318;
+.ai-suggest-pane-empty {
+  color: var(--ink-faint);
+  font-style: italic;
 }
 
-.ai-suggest-block.is-add {
-  background: rgba(46, 160, 67, 0.12);
-  border-color: rgba(46, 160, 67, 0.24);
+.ai-suggest-hl {
+  border-radius: 3px;
+  box-decoration-break: clone;
+  padding: 0.05em 0.08em;
 }
 
-.ai-suggest-block.is-add figcaption,
-.ai-suggest-block.is-add pre {
-  color: #067647;
+.ai-suggest-hl.is-before {
+  background: rgba(207, 34, 46, 0.16);
 }
 
-[data-scheme="dark"] .ai-suggest-tok.is-del {
+.ai-suggest-hl.is-after {
+  background: rgba(46, 160, 67, 0.18);
+}
+
+@container ai-suggest (max-width: 420px) {
+  .ai-suggest-split {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-suggest-pane.is-after {
+    border-left: none;
+    border-top: 1px solid var(--line);
+  }
+}
+
+[data-scheme="dark"] .ai-suggest-copy.is-gdocs .ai-suggest-tok.is-del {
   color: #ffa198;
   background: rgba(248, 81, 73, 0.16);
 }
 
-[data-scheme="dark"] .ai-suggest-tok.is-add {
+[data-scheme="dark"] .ai-suggest-copy.is-gdocs .ai-suggest-tok.is-add {
   color: #7ee787;
   background: rgba(46, 160, 67, 0.2);
 }
 
-[data-scheme="dark"] .ai-suggest-block.is-del {
-  background: rgba(248, 81, 73, 0.14);
-  border-color: rgba(248, 81, 73, 0.28);
+[data-scheme="dark"] .ai-suggest-hl.is-before {
+  background: rgba(248, 81, 73, 0.22);
 }
 
-[data-scheme="dark"] .ai-suggest-block.is-del figcaption,
-[data-scheme="dark"] .ai-suggest-block.is-del pre {
-  color: #ffa198;
-}
-
-[data-scheme="dark"] .ai-suggest-block.is-add {
-  background: rgba(46, 160, 67, 0.16);
-  border-color: rgba(46, 160, 67, 0.3);
-}
-
-[data-scheme="dark"] .ai-suggest-block.is-add figcaption,
-[data-scheme="dark"] .ai-suggest-block.is-add pre {
-  color: #7ee787;
+[data-scheme="dark"] .ai-suggest-hl.is-after {
+  background: rgba(46, 160, 67, 0.24);
 }
 
 .ai-suggest-actions {
@@ -2051,9 +2074,12 @@ a {
   gap: 0.2rem;
 }
 
-.ai-suggest-card.is-docked .ai-suggest-copy,
-.ai-suggest-card.is-docked .ai-suggest-compare {
-  max-height: 10rem;
+.ai-suggest-card.is-docked .ai-suggest-copy {
+  max-height: 7.5rem;
+}
+
+.ai-suggest-card.is-docked .ai-suggest-pane-body {
+  max-height: 8.5rem;
 }
 
 .ai-suggest-mark {
@@ -2071,6 +2097,10 @@ a {
   z-index: 12;
   width: min(440px, calc(100% - 16px));
   pointer-events: auto;
+}
+
+.ai-gram-pop:has(.ai-suggest-card.is-split) {
+  width: min(680px, calc(100% - 16px));
 }
 
 .ai-gram-pop.is-docked {

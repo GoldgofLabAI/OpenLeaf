@@ -665,8 +665,9 @@ export function CodeEditor({
         return;
       }
       const rect = host.getBoundingClientRect();
-      const top = Math.min(Math.max(8, visible.top + visible.height + 6), Math.max(8, rect.height - 160));
-      const left = Math.min(Math.max(8, visible.left), Math.max(8, rect.width - 280));
+      const popW = Math.min(680, Math.max(280, rect.width - 16));
+      const top = Math.min(Math.max(8, visible.top + visible.height + 6), Math.max(8, rect.height - 180));
+      const left = Math.min(Math.max(8, visible.left), Math.max(8, rect.width - popW - 8));
       setPopupPos({ top, left });
     };
 

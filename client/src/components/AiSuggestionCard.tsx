@@ -1,5 +1,6 @@
+import { useCallback, useRef, type ReactNode } from "react";
 import type { AiReviewHunk, AiReviewInline } from "../api/share";
-import { previewFromHunk } from "./aiSuggestPreview";
+import { previewFromHunk, type PreviewToken } from "./aiSuggestPreview";
 
 type Props = {
   hunk: AiReviewHunk;
@@ -21,13 +22,7 @@ type Props = {
 
 function fallbackInline(hunk: AiReviewHunk): AiReviewInline[] {
   if (hunk.inline?.length) return hunk.inline;
-  const out: AiReviewInline[] = [];
-  for (const line of hunk.lines) {
-    if (line.kind === "context") out.push({ kind: "eq", text: `${line.text} ` });
-    else if (line.kind === "del") out.push({ kind: "del", text: line.text });
-    else out.push({ kind: "add", text: line.text });
-  }
-  return out;
+  return [];
 }
 
 function kindOf(hunk: AiReviewHunk): "replace" | "insert" | "delete" {
@@ -45,7 +40,7 @@ function verb(kind: "replace" | "insert" | "delete"): string {
   return "Replace";
 }
 
-function renderTokens(tokens: AiReviewInline[]) {
+function renderGdocsTokens(tokens: PreviewToken[]): ReactNode {
   if (tokens.length === 0) {
     return <span className="ai-suggest-eq">Trailing newline change</span>;
   }
@@ -54,6 +49,85 @@ function renderTokens(tokens: AiReviewInline[]) {
       {t.text}
     </span>
   ));
+}
+
+function renderPaneTokens(tokens: PreviewToken[], side: "before" | "after"): ReactNode {
+  return tokens.map((t, i) => {
+    const mark = t.kind !== "eq";
+    return (
+      <span key={i} className={mark ? `ai-suggest-hl is-${side}` : undefined}>
+        {t.text}
+      </span>
+    );
+  });
+}
+
+function SplitCompare({
+  before,
+  after,
+  beforeTokens,
+  afterTokens,
+}: {
+  before: string;
+  after: string;
+  beforeTokens: PreviewToken[] | null;
+  afterTokens: PreviewToken[] | null;
+}) {
+  const leftRef = useRef<HTMLDivElement>(null);
+  const rightRef = useRef<HTMLDivElement>(null);
+  const lock = useRef(false);
+
+  const sync = useCallback((from: "left" | "right") => {
+    if (lock.current) return;
+    const a = from === "left" ? leftRef.current : rightRef.current;
+    const b = from === "left" ? rightRef.current : leftRef.current;
+    if (!a || !b) return;
+    const span = a.scrollHeight - a.clientHeight;
+    const ratio = span <= 0 ? 0 : a.scrollTop / span;
+    lock.current = true;
+    const dest = b.scrollHeight - b.clientHeight;
+    b.scrollTop = ratio * Math.max(0, dest);
+    requestAnimationFrame(() => {
+      lock.current = false;
+    });
+  }, []);
+
+  return (
+    <div className="ai-suggest-split">
+      <section className="ai-suggest-pane is-before">
+        <h3 className="ai-suggest-pane-label">Before</h3>
+        <div
+          ref={leftRef}
+          className="ai-suggest-pane-body"
+          onScroll={() => sync("left")}
+        >
+          {beforeTokens && beforeTokens.length > 0 ? (
+            renderPaneTokens(beforeTokens, "before")
+          ) : before ? (
+            before
+          ) : (
+            <span className="ai-suggest-pane-empty">No previous text</span>
+          )}
+        </div>
+      </section>
+      <section className="ai-suggest-pane is-after">
+        <h3 className="ai-suggest-pane-label">After</h3>
+        <div
+          ref={rightRef}
+          className="ai-suggest-pane-body"
+          onScroll={() => sync("right")}
+        >
+          {afterTokens && afterTokens.length > 0 ? (
+            renderPaneTokens(afterTokens, "after")
+          ) : after ? (
+            after
+          ) : (
+            <span className="ai-suggest-pane-empty">No new text</span>
+          )}
+        </div>
+      </section>
+    </div>
+  );
 }
 
 export function AiSuggestionCard({
@@ -75,8 +149,9 @@ export function AiSuggestionCard({
 
   return (
     <article
-      className={`ai-suggest-card${selected ? " is-selected" : ""}${compact ? " is-compact" : ""}${nav ? " is-docked" : ""}`}
+      className={`ai-suggest-card is-${preview.mode}${selected ? " is-selected" : ""}${compact ? " is-compact" : ""}${nav ? " is-docked" : ""}`}
       data-hunk-id={hunk.id}
+      data-preview-mode={preview.mode}
       onClick={onSelect}
     >
       {nav && (
@@ -117,28 +192,15 @@ export function AiSuggestionCard({
           </span>
         </header>
       )}
-      {preview.mode === "inline" ? (
-        <p className="ai-suggest-copy">{renderTokens(preview.tokens)}</p>
+      {preview.mode === "suggest" ? (
+        <p className="ai-suggest-copy is-gdocs">{renderGdocsTokens(preview.tokens)}</p>
       ) : (
-        <div className="ai-suggest-compare">
-          {preview.before ? (
-            <figure className="ai-suggest-block is-del">
-              <figcaption>Removed</figcaption>
-              <pre>{preview.before}</pre>
-            </figure>
-          ) : null}
-          {preview.after ? (
-            <figure className="ai-suggest-block is-add">
-              <figcaption>Added</figcaption>
-              <pre>{preview.after}</pre>
-            </figure>
-          ) : null}
-          {!preview.before && !preview.after ? (
-            <p className="ai-suggest-copy">
-              <span className="ai-suggest-eq">Trailing newline change</span>
-            </p>
-          ) : null}
-        </div>
+        <SplitCompare
+          before={preview.before}
+          after={preview.after}
+          beforeTokens={preview.beforeTokens}
+          afterTokens={preview.afterTokens}
+        />
       )}
       <div className="ai-suggest-actions">
         <button

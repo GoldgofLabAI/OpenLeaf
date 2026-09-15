@@ -2,7 +2,6 @@ import {
   alignEof,
   applySingleHunk,
   computeHunks,
-  condenseInline,
   hasCrlf,
   hashHunk,
   hunkAdditions,
@@ -138,7 +137,7 @@ function toView(path: string, h: TextHunk): ReviewHunkView {
     additions: hunkAdditions(h),
     deletions: hunkDeletions(h),
     lines: h.lines,
-    inline: mergeInlineTokens(condenseInline(tokens)),
+    inline: mergeInlineTokens(tokens),
     ranges:
       ranges.length > 0
         ? ranges
