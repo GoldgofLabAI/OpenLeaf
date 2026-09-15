@@ -367,7 +367,7 @@ See git log on `audit/overnight-quality-pass`. Created during this pass:
 1. `fd7f77c` — Harden guest file, comment, and AI permissions (server + tests)
 2. `50457e9` — Fix merge two-tap, session fallback, and editor chrome races (client)
 3. `059b381` — This report
-4. A follow-up commit of **pre-existing untracked product modules** (host gateway, AI review UI, etc.) so the branch typechecks; those files were already in the working tree and are not audit-authored.
+4. `8da7c16` — Pre-existing host gateway, AI review, and editor modules required for a buildable branch (not audit-authored)
 
 **Not audit-authored:** remaining host-gateway / AI-review modules were committed only so this branch typechecks; they predated the overnight pass.
 
