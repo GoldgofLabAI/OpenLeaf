@@ -3,13 +3,14 @@
 Date: 2026-09-15  
 Branch: `audit/overnight-quality-pass` (from `main` @ `30b715c`)  
 Auditor: autonomous overnight pass  
-Live process probed: `http://127.0.0.1:8787` (existing user systemd service — **not** restarted)
+Live process probed: `http://127.0.0.1:8787` (existing user systemd service — **not** restarted)  
+Isolated playtest: API `http://127.0.0.1:8799` + Vite `http://127.0.0.1:5199` with `OPENLEAF_PROJECTS_ROOT=/tmp/openleaf-audit-run/projects` (copy of `example-article` only; user papers untouched)
 
 ## 1. Executive summary
 
 OpenLeaf is a local-first LaTeX editor: Express API + React client, filesystem projects, Yjs collab, git-backed timeline, share/AI tunnels, and a host-gateway login on the public Cloudflare URL.
 
-This pass established a baseline, mapped the architecture, probed the live local API, and fixed a set of **clear, low-risk** correctness and permission bugs. It did **not** play-test the UI in a real browser: this environment has no Chromium/Playwright/browser MCP. Guest-share and host-gateway **browser** flows were therefore not end-to-end exercised.
+This pass established a baseline, mapped the architecture, probed the live local API, then play-tested the host UI in headless Chromium against an **isolated** instance of this branch (not production `:8787`). Guest-share and host-gateway **browser** flows were not end-to-end exercised: starting a share spawns `cloudflared` and would mutate tunnel state.
 
 Highest-impact fixes:
 
@@ -20,8 +21,10 @@ Highest-impact fixes:
 - Merge compose’s second tap replaced **From** when **Into** was prefilled.
 - Compile completion could apply PDF status to a branch the user had already left.
 - Invalid JSON and Zod validation returned **500** instead of **400**.
+- Escape cancelled merge compose but left the timeline drawer open; drawers covered the editor toolbar so overlapping-chrome close could not be clicked.
+- Missing projects returned default identities (200), then collab/PDF probes 404/500; `GET /timeline` could `git init` in a folder that does not exist.
 
-Automated tests went from **68 → 84** passing. Typecheck and production build succeeded. There is **no** repo lint script.
+Automated tests went from **68 → 94** passing. Typecheck succeeded. Isolated `:8799` returns **400** `{error:"Invalid JSON"}` and Zod `content: Required`. Headless Chromium playtest against `:5199`: **44 / 44** checks. There is **no** repo lint script.
 
 A large amount of **pre-existing uncommitted product work** (host gateway, AI links/review, mobile editor, merge composer, toolbar) was already in the working tree. It was preserved. Audit commits on this branch include tracked files that already contained that WIP.
 
@@ -68,45 +71,46 @@ No `lint` script in root, server, or client.
 
 ### Baseline automated tests (this run, after fixes)
 
-See §11. Conversation start recorded **68 pass / 0 fail** before the additional test files. This pass ends at **84 pass / 0 fail**.
+See §11. Conversation start recorded **68 pass / 0 fail** before the additional test files. Continuation ends at **94 pass / 0 fail**.
 
 ## 3. Audit coverage checklist
 
 | Area | Status | Evidence |
 |------|--------|----------|
 | Repo instructions (`AGENTS.md`, `README.md`) | inspected | Read in full |
-| Git status / branch | verified working | `audit/overnight-quality-pass`, dirty WIP preserved |
+| Git status / branch | verified working | `audit/overnight-quality-pass`; continuation committed (see §12) |
 | Architecture / routes / APIs | inspected | Code map + live GET inventory |
 | Install / lint | not tested / blocked | No lint script; `npm install` not re-run (deps present) |
-| Unit tests | verified working | `npm test` → 84 pass |
+| Unit tests | verified working | `npm test` → 94 pass |
 | Typecheck | verified working | `npm run typecheck` |
-| Production build | verified working | `npm run build` (Vite chunk-size warning, pre-existing) |
-| App reachable on :8787 | verified working | `GET /api/health` 200 `{ok:true,name:openleaf}` |
-| SPA shell / invalid URL | verified working (HTTP) | `/` and `/nope` → 200 `text/html` |
-| Project list API | verified working | 7 projects listed (user papers **not** mutated) |
-| example-article read APIs | verified working | project, tree, files, comments, identities, timeline, history, share, AI, leaves, trash |
+| Production build | verified working | `npm run build` **exit 0** after continuation (Vite chunk warning unchanged) |
+| App reachable on :8787 | verified working | `GET /api/health` 200 `{ok:true,name:openleaf}` — **old binary** |
+| Isolated API :8799 | verified working | health 200; invalid JSON **400**; Zod PUT `{}` **400** `content: Required` |
+| SPA shell / invalid URL | verified working (browser) | `/` home; `/no-such-route-xyz` redirects home |
+| Project list API | verified working | isolated: `example-article` + `audit-playtest` only |
+| example-article read APIs | verified working | project, tree, files, comments, identities, timeline (isolated copy) |
 | Path traversal | verified working | `files/../..` → 400 `Path escape` |
-| Missing project / file | verified working | 404 |
+| Missing project / file | verified working | API 404; UI “Project not found” + Back; no PDF/collab probe |
 | Invalid project id / unicode id | verified working | 400 |
-| Download PDF/ZIP | verified working | 200 PDF 125887 B, ZIP 8603 B (example-article) |
-| SyncTeX forward | verified working | 200 hit on `main.tex:1` |
-| Diff highlights | verified working | 200 |
-| Host login wrong password | verified working | 401 |
-| Guest login on LAN | verified working | 400 “only available through a share link” |
-| Invalid JSON body (live service) | pre-existing failure | **500** on running process (fix not deployed) |
-| Zod validation (live service) | pre-existing failure | **500** with raw Zod dump (fix not deployed) |
-| Editor UI happy path | inspected but not fully exercised | No browser |
-| Mobile / responsive | inspected but not fully exercised | CSS + code; no viewport device |
-| Keyboard / SR | inspected but not fully exercised | Some a11y fixes; no SR |
-| Themes | inspected but not fully exercised | Theme picker code + `aria-label` |
-| Account / host-gateway UI | inspected but not fully exercised | Would need public hostname + credentials in a browser |
-| Guest share E2E | blocked | Starting a share spawns cloudflared and mutates live tunnels |
-| AI review accept/reject in UI | inspected but not fully exercised | Unit tests cover server hunk review |
-| Merge compose in UI | inspected but not fully exercised | Unit tests cover two-tap logic |
-| Collab WS two-client | not tested | No second browser |
-| Offline / timeout UI | not tested | No browser; no fault injection on live service |
+| Download PDF/ZIP | verified working | 200 on live :8787 earlier; isolated compile produced PDF in UI |
+| SyncTeX forward | verified working | 200 hit on `main.tex:1` (:8787 earlier) |
+| Diff highlights | verified working | 200 (:8787 earlier) |
+| Host login wrong password | verified working | 401 (:8787 earlier) |
+| Guest login on LAN | verified working | 400 “only available through a share link” (:8799) |
+| Invalid JSON body (isolated :8799) | verified working | **400** `{error:"Invalid JSON"}` |
+| Zod validation (isolated :8799) | verified working | **400** `content: Required` / `identityId: Required` / `username: Required` |
+| Editor UI happy path | verified working | Chromium: home, create/open, Monaco type, Recompile PDF, Commit, file context menu |
+| Mobile / responsive | verified working | 390×844: Files/Source/Preview panes; identity in ⋮; Share/AI/Comments in menu. More-actions ~6px past viewport (deferred) |
+| Keyboard / SR | inspected; keyboard verified | Theme Escape; timeline Escape cancels merge then closes drawer; no screen reader |
+| Themes | verified working | Home + editor theme picker; Escape closes |
+| Account / host-gateway UI | inspected but not fully exercised | Isolated `OPENLEAF_HOST_GATEWAY=0`; would need public hostname |
+| Guest share E2E | blocked | Starting a share spawns cloudflared |
+| AI review accept/reject in UI | inspected; panel opened | No live AI token minted (would start a gateway) |
+| Merge compose in UI | verified working | Two-tap: Into prefilled `audit-fork`, tap MAIN fills From; dirty landing tip blocks Start merge |
+| Collab WS two-client | not tested | Single headless browser |
+| Offline / timeout UI | not tested | No fault injection |
 | Large-file UI | not tested | |
-| Destructive prune/delete forever | not tested | Unsafe on live projects |
+| Destructive prune/delete forever | not tested | Unsafe; not run on user papers or isolated sacred main |
 | Production deploy / service restart | not tested | Intentionally not done |
 
 ## 4. User journeys tested
@@ -130,7 +134,23 @@ See §11. Conversation start recorded **68 pass / 0 fail** before the additional
 
 ### Not run as a user in a browser
 
-Timeline Merge compose, Commit, Recompile, file tree mutations, comments UI, AI review cards, share mint, host login form, mobile tabs, theme menu, dirty-state dialogs.
+Timeline Merge compose, Commit, Recompile, file tree context menu, comments drawer, share/AI drawers (opened, **not** started), host-local theme menus, mobile tabs, dirty-state merge block.
+
+### Isolated Chromium (`:5199` → `:8799`)
+
+Temp project `audit-playtest` only (seeded from example-article). Screenshots under `/tmp/openleaf-audit-shots`.
+
+1. Home: OpenLeaf, example-article, theme picker, Escape closes theme
+2. Open editor: Monaco, type `% audit-playtest-marker`, Recompile shows PDF, Commit
+3. Timeline + Merge composer; tap MAIN → From=main, Into=audit-fork; dirty Into blocks Start merge
+4. Escape cancels merge then closes timeline
+5. Comments drawer; Timeline click closes comments (toolbar stays clickable)
+6. Share and AI links drawers (no mint / no Create link)
+7. Theme switch, file-tree context menu (Open / New file / Delete)
+8. Unknown route → home; missing project → “Project not found” + Back
+9. 390×844: Files / Source / Preview; ⋮ has identity, Comment on selection, Share, AI links
+
+**44 / 44** scripted checks. Unexpected HTTP ≥400 on happy paths: none. Missing-project `GET /api/projects/does-not-exist-audit` 404 is expected.
 
 ## 5. Issues fixed
 
@@ -176,9 +196,9 @@ Timeline Merge compose, Commit, Recompile, file tree mutations, comments UI, AI 
 
 - **Severity:** Critical (authorization / UX)
 - **Symptoms:** Network blip or 5xx on `guestMe()` set `{ kind: "host" }`.
-- **Fix:** keep established guest / host-login / inactive sessions; only first-load `loading` falls back to local host.
-- **Tests:** none (client has no test runner). Typecheck + code review.
-- **Verification:** typecheck
+- **Fix:** keep established guest / host-login / inactive sessions; only first-load `loading` falls back to local host. Extracted `sessionAfterMeFailure`.
+- **Tests:** `httpErrors.test.ts` `sessionAfterMeFailure`
+- **Verification:** typecheck + unit tests
 
 ### OL-07 — Merge two-tap replaces From when Into is prefilled
 
@@ -204,10 +224,40 @@ Timeline Merge compose, Commit, Recompile, file tree mutations, comments UI, AI 
 ### OL-10 — Invalid JSON and Zod errors return 500
 
 - **Severity:** Medium
-- **Symptoms:** `POST {not json` → 500; empty PUT file body → 500 + Zod dump (confirmed live).
-- **Fix:** JSON syntax → 400 in `index.ts`; `ZodError` → 400 in projects/guest/host `statusOf` (AI/share already did this).
-- **Tests:** not an HTTP integration test (live process not restarted). Typecheck.
-- **Verification:** unit suite green; live :8787 still 500 until rebuild+restart
+- **Symptoms:** `POST {not json` → 500; empty PUT file body → 500 + Zod dump (confirmed live `:8787`).
+- **Fix:** `invalidJsonMiddleware` + `publicErrorMessage` (first Zod issue as `path: message`); `statusOf` maps `ZodError` → 400.
+- **Tests:** `httpErrors.test.ts`; isolated `:8799` curl
+- **Verification:** `:8799` invalid JSON **400** `{error:"Invalid JSON"}`; PUT `{}` **400** `content: Required`. Live `:8787` still 500 until rebuild+restart
+
+### OL-22 — Escape does not close the timeline drawer
+
+- **Severity:** Medium (UX trap)
+- **Symptoms:** After Merge compose, first Escape cancelled the draft; the Sacred timeline drawer stayed open and ate toolbar clicks (More actions / Comments).
+- **Fix:** `nextTimelineEscape` peels delete → fork → merge draft → dock, then `onClose()`.
+- **Tests:** `mergeCompose.test.ts` `nextTimelineEscape`; Chromium Escape after merge
+- **Verification:** playtest `escape-closes-timeline`
+
+### OL-23 — Drawers cover the editor toolbar
+
+- **Severity:** High (blocks OL-09 in the browser)
+- **Symptoms:** `.history-drawer` / `.comments-drawer` were `position:fixed; top:0; z-index:40` over `.editor-toolbar` (`z-index:20`). Timeline Close sat on top of More actions.
+- **Fix:** drawers start at `top: var(--toolbar-h)`; toolbar `z-index: 45`.
+- **Tests:** none (CSS). Chromium: Timeline remains clickable with Comments open; opening Timeline closes Comments.
+- **Verification:** playtest `timeline-closes-comments`; screenshot `08-comments-vs-timeline.png`
+
+### OL-24 — Missing project looks like a real project to identities / git
+
+- **Severity:** Medium
+- **Symptoms:** `GET /identities` returned default identities (200) for a folder that does not exist, so collab WS tried to connect. `loadTimeline` → `ensureProjectGit` could `git init` / `mkdir` under a ghost id and 500.
+- **Fix:** `getProjectIdentities` and `ensureProjectGit` / `loadTimeline` 404 if the project dir is missing. Editor waits for `project.id === route id` before collab, comments, AI poll, timeline, merge restore, or PDF probe. Missing UI: “Opening project…” then “Project not found”.
+- **Tests:** `comments.test.ts` identities 404; `projectGit.test.ts` `ensureProjectGit` 404; `:8799` identities/timeline 404
+- **Verification:** playtest missing-project UI; no unexpected HTTP errors after gating PDF probe
+
+### OL-D3 — Flush collab before starting a merge (was deferred)
+
+- **Severity:** Medium (data loss)
+- **Fix:** `BranchTreePanel` `onBeforeMerge` → `flushCollab` from `EditorPage` before checkout/start merge.
+- **Tests:** none (client). Typecheck. Merge UI still blocks when git dirty (typed marker without Commit).
 
 ### OL-11 — Identity picker missing on narrow viewports
 
@@ -298,7 +348,7 @@ Timeline Merge compose, Commit, Recompile, file tree mutations, comments UI, AI 
 |----|----------|--------------|------------------------|
 | OL-D1 | Medium | Host logout only clears the browser cookie; HMAC secret is not rotated (would sign out every device) | Per-token nonce / session version in `host-auth.json` |
 | OL-D2 | Low | `app.use(cors())` → `Access-Control-Allow-Origin: *` | Keep if cookies are SameSite; do not add `credentials: true` with `*` |
-| OL-D3 | Medium | Timeline `dirty` is git dirty, not unflushed CRDT; merge can start while Monaco has unsaved Yjs | Flush collab (or block) in `confirmMerge` |
+| OL-D3 | Medium | **Fixed** in continuation (`onBeforeMerge` flush). Git-dirty landing tip still blocks Start merge (correct). | — |
 | OL-D4 | Low | README still says “no authentication” | Update README to describe LAN vs host-gateway vs share |
 | OL-D5 | Low | Comments/AI/share drawers are not focus-trapped | Dialog focus trap + restore |
 | OL-D6 | Low | Duplicate AI focus effects (`EditorPage` + `AiReviewPanel`) | Single owner for focus nonce |
@@ -313,14 +363,14 @@ Timeline Merge compose, Commit, Recompile, file tree mutations, comments UI, AI 
 
 | Area | Blocker |
 |------|---------|
-| Click/keyboard UI, viewports, themes, modals | No Chromium, Playwright, or browser MCP |
-| Host-gateway login in a real browser | Public URL exists (`supplier-society-treaty-church.trycloudflare.com` at probe time) but no browser; credentials not used beyond failure-case API |
-| Guest share join → edit → leave | Starting a share would spawn cloudflared and change live tunnel state |
-| AI collaborator tools against a live token | Would mint/revoke on a real project |
-| Two-user collab races | Single machine, no second client |
+| Click/keyboard UI, viewports, themes, modals | **Done** on isolated `:5199` (see §4). Guest/host-gateway still blocked |
+| Host-gateway login in a real browser | Isolated run set `OPENLEAF_HOST_GATEWAY=0`; production public URL not opened |
+| Guest share join → edit → leave | Starting a share would spawn cloudflared |
+| AI collaborator tools against a live token | Would mint/revoke; Share/AI drawers opened only |
+| Two-user collab races | Single headless browser |
 | Production UI after these fixes | Did not restart systemd; `:8787` still serves the **previous** build |
 | Screen reader | No AT |
-| iOS/Android Safari | No device lab |
+| iOS/Android Safari | Mobile viewport in Chromium only |
 | Offline | Not injected |
 
 **Live-probe side effects (unintended, contained):**
@@ -349,10 +399,18 @@ Commands (repo root `/home/yinzh/Projects/OpenLeaf`):
 
 | Command | Result |
 |---------|--------|
-| `npm test` | **84 pass / 0 fail** (~1.1–1.4 s) |
+| `npm test` | **94 pass / 0 fail** (~1.3 s) |
 | `npm run typecheck` | **exit 0** (server + client) |
-| `npm run build` | **exit 0**; Vite built in ~17 s; chunk-size warning |
+| Isolated Chromium playtest | **44 pass / 0 fail** (`/tmp/openleaf-audit-playtest.py` vs `:5199`/`:8799`) |
+| `npm run build` | **exit 0** after continuation (`tsc` + Vite; main chunk ~4.26 MB warning) |
 | `npm run lint` | **no such script** |
+
+Isolated `:8799` (this branch, temp projects):
+
+- `GET /api/health` → 200
+- invalid JSON → 400 `{error:"Invalid JSON"}`
+- PUT file `{}` → 400 `content: Required`
+- missing identities/timeline → 404 `Project not found`
 
 Live service (unchanged binary):
 
@@ -362,26 +420,33 @@ Live service (unchanged binary):
 
 ## 12. Commits created
 
-See git log on `audit/overnight-quality-pass`. Created during this pass:
+On `audit/overnight-quality-pass` (do **not** merge to `main`):
 
-1. `fd7f77c` — Harden guest file, comment, and AI permissions (server + tests)
-2. `50457e9` — Fix merge two-tap, session fallback, and editor chrome races (client)
-3. `059b381` — This report
-4. `8da7c16` — Pre-existing host gateway, AI review, and editor modules required for a buildable branch (not audit-authored)
+| Hash | Subject |
+|------|---------|
+| `fd7f77c` | Harden guest file, comment, and AI permissions |
+| `50457e9` | Fix merge two-tap, session fallback, and editor chrome races |
+| `059b381` | Document the overnight OpenLeaf quality audit (first report) |
+| `8da7c16` | Keep in-progress host, AI, and editor modules on this branch |
+| `00d7363` | Record the WIP snapshot commit hash in the audit report |
+| `81f19dd` | Extract session fallback and timeline Escape helpers |
+| `a05afec` | Return 400 for invalid JSON and 404 for missing projects |
+| `6c6e6c9` | Gate editor load and keep timeline chrome below the toolbar |
+| (this file) | Continuation report: 94 tests, 44 playtest checks, hashes above |
 
-**Not audit-authored:** remaining host-gateway / AI-review modules were committed only so this branch typechecks; they predated the overnight pass.
+**Not audit-authored:** `8da7c16` contains host-gateway / AI-review / editor modules that predated the overnight pass and were committed only so this branch typechecks.
 
 **Mixed files:** tracked files such as `EditorPage.tsx` already contained WIP; audit hunks sit in those files.
 
 ## 13. Remaining risks and prioritized next actions
 
-1. **Restart is required** for server fixes to protect live shares (`OL-01`–`OL-05`, `OL-10`). Do this when you are ready; it will also rotate the trycloudflare host URL unless a named tunnel is configured.
-2. Add a **client test runner** and cover SessionContext fallback + compile branch guard.
-3. Flush or block merge when the CRDT is dirty (`OL-D3`).
-4. Host-session revocation without logging out every device (`OL-D1`).
-5. Browser E2E (Playwright) for merge two-tap, drawers, guest read-only, host login.
-6. Update README auth model (`OL-D4`).
-7. Dialog focus trapping (`OL-D5`).
+1. **Restart is required** for server fixes to protect live shares (`OL-01`–`OL-05`, `OL-10`, `OL-24`). Do this when you are ready; it will also rotate the trycloudflare host URL unless a named tunnel is configured.
+2. Add a **client test runner** and cover SessionContext fallback + compile branch guard (`sessionAfterMeFailure` is already unit-tested via the server suite import).
+3. Host-session revocation without logging out every device (`OL-D1`).
+4. Guest-share and host-gateway **browser** E2E (needs a disposable tunnel, not production).
+5. Update README auth model (`OL-D4`).
+6. Dialog focus trapping (`OL-D5`).
+7. Narrow toolbar: More actions ~6px past a 390px viewport.
 
 Do **not** merge this branch to `main` as part of the audit. Do **not** treat the leftover WIP as audit-authored.
 
@@ -396,12 +461,17 @@ Do **not** merge this branch to `main` as part of the audit. Do **not** treat th
 | OL-03 | Medium | Auth / comments | Read-only share mutates comments | tested and fixed | `guestRouteDenial` test | Deploy server |
 | OL-04 | Medium | Auth / comments | Guest deletes others’ comments | tested and fixed | `guestMayMutateComment` tests + UI hide | Deploy server |
 | OL-05 | Medium | Auth / AI | Guest revokes host AI links | tested and fixed | `guestMayRevokeAi` tests | Deploy server |
-| OL-06 | Critical | Session | `/guest/me` fail → host UI | tested and fixed | `SessionContext.tsx` (no client test) | Add Vitest; rebuild client |
-| OL-07 | High | Merge UI | Second tap replaces From | tested and fixed | `mergeCompose.test.ts` | Rebuild client |
+| OL-06 | Critical | Session | `/guest/me` fail → host UI | tested and fixed | `sessionAfterMeFailure` tests | Rebuild client |
+| OL-07 | High | Merge UI | Second tap replaces From | tested and fixed | `mergeCompose.test.ts` + Chromium two-tap | Rebuild client |
+| OL-09 | High | Chrome | Drawers overlap | tested and fixed | `closeOverlappingChrome` + OL-23 inset | Rebuild client |
+| OL-10 | Medium | API | JSON/Zod → 500 | tested and fixed (source) | `:8799` 400; live still 500 | Restart service |
+| OL-11 | High | Mobile | Identity/Leave hidden | tested and fixed | Chromium 390px ⋮ identity | Rebuild client |
+| OL-20 | Low | A11y | Escape ignores drawers | tested and fixed | EditorPage + OL-22 timeline | Rebuild client |
+| OL-22 | Medium | Timeline | Escape leaves drawer open | tested and fixed | `nextTimelineEscape` + Chromium | Rebuild client |
+| OL-23 | High | Chrome | Drawer covers toolbar | tested and fixed | CSS `top: var(--toolbar-h)` | Rebuild client |
+| OL-24 | Medium | FS / collab | Missing project 200/500 | tested and fixed | identities/git 404 tests + Chromium | Deploy server + client |
+| OL-D3 | Medium | Merge | Unflushed CRDT vs git dirty | tested and fixed | `onBeforeMerge` flush | Rebuild client |
 | OL-08 | High | Compile | Stale branch PDF bust | tested and fixed | `EditorPage.tsx` runCompile | Rebuild client |
-| OL-09 | High | Chrome | Drawers overlap | tested and fixed | `closeOverlappingChrome` | Rebuild client |
-| OL-10 | Medium | API | JSON/Zod → 500 | tested and fixed (source) | Live still 500 | Restart service |
-| OL-11 | High | Mobile | Identity/Leave hidden | tested and fixed | overflow menu | Rebuild client |
 | OL-12 | Low | Editor | treeWidth stale save | tested and fixed | `treeWidthRef` | Rebuild client |
 | OL-13 | Low | File tree | Empty RO context menu | tested and fixed | `FileTree.tsx` | Rebuild client |
 | OL-14 | Low | Clipboard | Unhandled rejection | tested and fixed | `lib/clipboard.ts` | Rebuild client |
@@ -410,11 +480,9 @@ Do **not** merge this branch to `main` as part of the audit. Do **not** treat th
 | OL-17 | Medium | AI review | Popup errors swallowed | tested and fixed | `runPopupReview` | Rebuild client |
 | OL-18 | Medium | Merge | Draft lost on file switch | tested and fixed | `MergePanel` cache | Rebuild client |
 | OL-19 | Medium | Persistence | No dirty leave warning | tested and fixed | beforeunload + hidden flush | Rebuild client |
-| OL-20 | Low | A11y | Escape ignores drawers | tested and fixed | EditorPage keydown | Rebuild client |
 | OL-21 | Low | Config | Empty PATCH writes disk | tested and fixed | `patchConfig` early return | Deploy server |
 | OL-D1 | Medium | Host auth | Logout does not revoke tokens | deferred | `clearHostCookieHeader` | Session nonce |
 | OL-D2 | Low | CORS | `*` origin | deferred | live `Access-Control-Allow-Origin: *` | Tighten if cookies ever go cross-site |
-| OL-D3 | Medium | Merge | Unflushed CRDT vs git dirty | deferred | `confirmMerge` uses `view.dirty` | Flush then merge |
 | OL-D4 | Low | Docs | README “no authentication” | deferred | README line 31 | Rewrite auth section |
 | OL-D5 | Low | A11y | No focus trap | deferred | drawer markup | Dialog pattern |
 | OL-D6 | Low | AI review | Duplicate focus effects | deferred | EditorPage + AiReviewPanel | Single owner |
@@ -422,6 +490,8 @@ Do **not** merge this branch to `main` as part of the audit. Do **not** treat th
 | OL-D8 | Low | Tests | No client runner | deferred | `client/package.json` | Vitest |
 | OL-D9 | Medium | Ops | Fixes not on live process | deferred | live 500 JSON | Restart when ready |
 | OL-D10 | Low | Perf | 4.3 MB main chunk | deferred | Vite build warning | Code-split Monaco |
+| OL-D11 | Low | Git | example-article tip dirty | deferred | pre-existing dirty + leftover `ai/*` | Host commit/discard |
+| OL-D12 | Low | Guest UI | Comment identity plumbing | deferred | guest identity on mobile | Confirm after OL-11 |
 | OL-L1 | — | Health | API up | verified working | GET /api/health 200 | — |
 | OL-L2 | — | Projects | List + example-article reads | verified working | curl inventory | — |
 | OL-L3 | — | FS safety | Path escape | verified working | 400 | — |
