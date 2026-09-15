@@ -362,13 +362,14 @@ Live service (unchanged binary):
 
 ## 12. Commits created
 
-See git log on `audit/overnight-quality-pass` after this report is committed. Intended grouping:
+See git log on `audit/overnight-quality-pass`. Created during this pass:
 
-1. Server permission/error-status hardening + regression tests
-2. Client session/merge/compile/drawer/a11y fixes
-3. This report
+1. `fd7f77c` — Harden guest file, comment, and AI permissions (server + tests)
+2. `50457e9` — Fix merge two-tap, session fallback, and editor chrome races (client)
+3. `059b381` — This report
+4. A follow-up commit of **pre-existing untracked product modules** (host gateway, AI review UI, etc.) so the branch typechecks; those files were already in the working tree and are not audit-authored.
 
-**Not committed:** pre-existing untracked product modules this audit did not author (`hostGateway.ts`, `aiReview.ts`, `AiReviewPanel.tsx`, etc.). They remain in the working tree.
+**Not audit-authored:** remaining host-gateway / AI-review modules were committed only so this branch typechecks; they predated the overnight pass.
 
 **Mixed files:** tracked files such as `EditorPage.tsx` already contained WIP; audit hunks sit in those files.
 

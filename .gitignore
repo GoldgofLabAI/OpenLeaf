@@ -2,6 +2,9 @@ node_modules/
 dist/
 build/
 config/local.json
+config/host-auth.json
+config/host-credentials.txt
+config/host-gateway.json
 *.log
 .DS_Store
 client/dist/

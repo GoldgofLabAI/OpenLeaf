@@ -78,6 +78,22 @@ export function isGitEnabled(): boolean {
   return loadConfig().git?.enabled !== false;
 }
 
+/** Read a committed blob as UTF-8. Returns null if the path is missing at that commit. */
+export async function readCommitText(
+  id: string,
+  gitHash: string,
+  relativePath: string,
+  cwd?: string,
+): Promise<string | null> {
+  if (!gitHash || !relativePath) return null;
+  const result = await runGit(id, ["show", `${gitHash}:${relativePath.replace(/\\/g, "/")}`], {
+    cwd,
+    allowFailure: true,
+  });
+  if (result.code !== 0) return null;
+  return result.stdout;
+}
+
 /** Ensure the project is a git repo with a sensible .gitignore. */
 export async function ensureProjectGit(id: string): Promise<void> {
   if (!isGitEnabled()) return;

@@ -260,7 +260,7 @@ export async function assertTipSafeForDestructiveOp(
   const verb = op === "prune" ? "pruning" : "deleting";
 
   const { listSharesForProject } = await import("./share.js");
-  const { ensureAiList, isAiLinkDead } = await import("./aiShare.js");
+  const { listLiveAi } = await import("./aiShare.js");
   for (const session of listSharesForProject(projectId)) {
     if (session.status !== "active" && session.status !== "starting") continue;
 
@@ -273,21 +273,20 @@ export async function assertTipSafeForDestructiveOp(
           : `End the public share on this tip before ${verb} it`,
       );
     }
+  }
 
-    for (const ai of ensureAiList(session)) {
-      if (isAiLinkDead(session, ai)) continue;
-      if (ai.branchId === branchId) {
-        throw err(
-          409,
-          `AI collaborator “${ai.branchName}” is still live on this tip — revoke the AI link before ${verb} it`,
-        );
-      }
-      if (ai.parentBranchId === branchId) {
-        throw err(
-          409,
-          `AI collaborator “${ai.branchName}” was forked from this tip and is still live — revoke it (or end the share) before ${verb}`,
-        );
-      }
+  for (const ai of listLiveAi(projectId)) {
+    if (ai.branchId === branchId) {
+      throw err(
+        409,
+        `AI collaborator “${ai.branchName}” is still live on this tip — revoke the AI link before ${verb} it`,
+      );
+    }
+    if (ai.parentBranchId === branchId) {
+      throw err(
+        409,
+        `AI collaborator “${ai.branchName}” was forked from this tip and is still live — revoke the AI link before ${verb}`,
+      );
     }
   }
 

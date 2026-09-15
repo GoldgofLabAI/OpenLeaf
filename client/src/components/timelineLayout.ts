@@ -77,6 +77,17 @@ function scaleFor(compact?: boolean): Scale {
   };
 }
 
+/** AI sandbox forks use `ai/…` names (and sometimes matching ids). */
+export function isAiBranch(branch: { id?: string | null; name?: string | null } | null | undefined): boolean {
+  if (!branch) return false;
+  return Boolean(branch.name?.startsWith("ai/") || branch.id?.startsWith("ai/"));
+}
+
+/** Strip the `ai/` prefix so timeline chips can show a separate AI badge. */
+export function aiBranchLabel(name: string): string {
+  return name.startsWith("ai/") ? name.slice(3) : name;
+}
+
 export function formatWhen(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
@@ -380,7 +391,7 @@ export function layoutTimeline(
         y: yOf(branch.id),
         isHead: branch.headNodeId === node.id,
         isSacred: Boolean(branch.sacred),
-        isAi: branch.name.startsWith("ai/"),
+        isAi: isAiBranch(branch),
         lane,
         tickAbove,
         labelAbove: !tickAbove,
@@ -482,6 +493,56 @@ export function threadPath(e: TimelineLayoutEdge): string {
     return `M ${x1} ${y1} L ${x2} ${y1} L ${x2} ${y2}`;
   }
   return `M ${x1} ${y1} L ${x2 + r} ${y1} Q ${x2} ${y1} ${x2} ${y1 + sy * r} L ${x2} ${y2}`;
+}
+
+/** Ghost geometry for a not-yet-committed merge (source tip → new leaf on target). */
+export function mergePreviewGeometry(
+  nodes: TimelineLayoutNode[],
+  sourceNodeId: string,
+  targetNodeId: string,
+  compact?: boolean,
+): {
+  source: TimelineLayoutNode;
+  target: TimelineLayoutNode;
+  ghostX: number;
+  ghostY: number;
+  stem: TimelineLayoutEdge;
+  merge: TimelineLayoutEdge;
+} | null {
+  const source = nodes.find((n) => n.node.id === sourceNodeId);
+  const target = nodes.find((n) => n.node.id === targetNodeId);
+  if (!source || !target || source.node.id === target.node.id) return null;
+  const gap = compact ? 72 : 108;
+  const ghostX = target.x + gap;
+  const ghostY = target.y;
+  return {
+    source,
+    target,
+    ghostX,
+    ghostY,
+    stem: {
+      id: "pending-stem",
+      x1: target.x,
+      y1: target.y,
+      x2: ghostX,
+      y2: ghostY,
+      sacred: target.isSacred,
+      fork: false,
+      ai: target.isAi,
+      merge: false,
+    },
+    merge: {
+      id: "pending-merge",
+      x1: source.x,
+      y1: source.y,
+      x2: ghostX,
+      y2: ghostY,
+      sacred: false,
+      fork: false,
+      ai: source.isAi || target.isAi,
+      merge: true,
+    },
+  };
 }
 
 /** Inset endpoints so the stroke meets the orb rim, not the center. */

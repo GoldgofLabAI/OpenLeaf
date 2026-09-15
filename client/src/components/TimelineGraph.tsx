@@ -12,8 +12,10 @@ import {
 import type { BranchLeafStat } from "../api/client";
 import type { TimelineBranch, TimelineNode, TimelineView } from "../api/types";
 import {
+  aiBranchLabel,
   formatTickTime,
   layoutTimeline,
+  mergePreviewGeometry,
   shortMsg,
   threadPathInset,
   type TimelineLayoutNode,
@@ -38,6 +40,10 @@ type Props = {
   children?: ReactNode;
   /** Recenter when this bumps (e.g. after load). */
   recenterToken?: number | string;
+  /** Compose a merge: highlight from/into tips and draw a blinking post-merge preview. */
+  merging?: boolean;
+  mergeFromId?: string | null;
+  mergeIntoId?: string | null;
 };
 
 export function TimelineGraph({
@@ -54,6 +60,9 @@ export function TimelineGraph({
   onHoverIdChange,
   children,
   recenterToken,
+  merging = false,
+  mergeFromId = null,
+  mergeIntoId = null,
 }: Props) {
   const uid = useId().replace(/:/g, "");
   const gradId = `tl-sacred-grad-${uid}`;
@@ -82,6 +91,17 @@ export function TimelineGraph({
           },
     [view, compact],
   );
+
+  const preview = useMemo(
+    () =>
+      mergeFromId && mergeIntoId
+        ? mergePreviewGeometry(layout.nodes, mergeFromId, mergeIntoId, compact)
+        : null,
+    [layout.nodes, mergeFromId, mergeIntoId, compact],
+  );
+
+  const worldW = Math.max(layout.width, preview ? preview.ghostX + (compact ? 96 : 140) : 0);
+  const worldH = layout.height;
 
   const recenter = useCallback(() => {
     const el = surfaceRef.current;
@@ -183,7 +203,7 @@ export function TimelineGraph({
 
   return (
     <div
-      className={`timeline-surface${compact ? " is-compact" : ""}${className ? ` ${className}` : ""}`}
+      className={`timeline-surface${compact ? " is-compact" : ""}${merging ? " is-merging" : ""}${className ? ` ${className}` : ""}`}
       ref={surfaceRef}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -194,11 +214,11 @@ export function TimelineGraph({
       <div
         className="timeline-world"
         ref={worldRef}
-        style={{ transform: `translate(${pan.x}px, ${pan.y}px)`, width: layout.width, height: layout.height }}
+        style={{ transform: `translate(${pan.x}px, ${pan.y}px)`, width: worldW, height: worldH }}
       >
-        <div className="tl-spine is-horizontal" style={{ top: layout.originY, width: layout.width }} aria-hidden />
+        <div className="tl-spine is-horizontal" style={{ top: layout.originY, width: worldW }} aria-hidden />
 
-        <svg className="timeline-edges" width={layout.width} height={layout.height}>
+        <svg className="timeline-edges" width={worldW} height={worldH}>
           <defs>
             <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="0">
               <stop offset="0%" stopColor="var(--tl-sacred)" stopOpacity="0.15" />
@@ -252,11 +272,28 @@ export function TimelineGraph({
               />
             );
           })}
+          {preview && (
+            <>
+              <path
+                d={threadPathInset(preview.stem, 9)}
+                className={`tl-thread is-pending is-stem${preview.target.isSacred ? " is-sacred" : preview.target.isAi ? " is-ai" : ""}`}
+                fill="none"
+              />
+              <path
+                d={threadPathInset(preview.merge, 11)}
+                className={`tl-thread is-merge is-pending${preview.merge.ai ? " is-ai-merge" : ""}`}
+                fill="none"
+                markerEnd={`url(#${mergeArrowId})`}
+              />
+            </>
+          )}
         </svg>
 
         {layout.nodes.map((l) => {
           const selected = l.node.id === selectedId;
           const hot = l.node.id === hotId;
+          const from = l.node.id === mergeFromId;
+          const into = l.node.id === mergeIntoId;
           const leaf = l.isHead ? leafByBranch?.get(l.branch.id) : undefined;
           const tickPad = 2 + l.tickTier * 18;
           const labelPad = 12 + l.labelTier * 26;
@@ -271,6 +308,8 @@ export function TimelineGraph({
                 selected ? "is-selected" : "",
                 l.node.legacy ? "is-legacy" : "",
                 hot ? "is-hot" : "",
+                from ? "is-merge-from" : "",
+                into ? "is-merge-into" : "",
                 leaf?.dirty ? "is-dirty" : "",
                 l.tickAbove ? "tick-above" : "tick-below",
                 l.labelAbove ? "label-above" : "label-below",
@@ -286,7 +325,7 @@ export function TimelineGraph({
                 } as CSSProperties
               }
               disabled={busy}
-              aria-label={`${l.branch.name}: ${l.node.message}`}
+              aria-label={`${l.isAi ? "AI sandbox " : ""}${l.branch.name}: ${l.node.message}`}
               onMouseEnter={onHoverIdChange ? () => keepHover(l.node.id) : undefined}
               onMouseLeave={onHoverIdChange ? clearHoverSoon : undefined}
               onFocus={onHoverIdChange ? () => keepHover(l.node.id) : undefined}
@@ -313,7 +352,12 @@ export function TimelineGraph({
                 >
                   {l.isHead || l.labelMaxChars === 0 ? (
                     <>
-                      <span className="tl-orb-branch">{l.branch.name}</span>
+                      {l.isAi && (
+                        <span className="tl-ai-tag" aria-hidden>
+                          AI
+                        </span>
+                      )}
+                      <span className="tl-orb-branch">{l.isAi ? aiBranchLabel(l.branch.name) : l.branch.name}</span>
                       {leaf?.dirty ? (
                         <span className="tl-orb-dirty-dot" title="Uncommitted changes" />
                       ) : null}
@@ -326,6 +370,20 @@ export function TimelineGraph({
             </button>
           );
         })}
+
+        {preview && (
+          <span
+            className="tl-orb is-pending is-head is-branch"
+            style={{ left: preview.ghostX, top: preview.ghostY }}
+            aria-hidden
+          >
+            <span className="tl-orb-core" />
+            <span className="tl-orb-ring" />
+            <span className="tl-orb-label is-chip is-below">
+              <span className="tl-orb-branch">merge</span>
+            </span>
+          </span>
+        )}
 
         {layout.nodes.length === 0 && !loading && (
           <div className="timeline-empty" style={{ left: layout.padLeft, top: layout.originY }}>

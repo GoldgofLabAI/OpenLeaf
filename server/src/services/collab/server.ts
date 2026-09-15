@@ -7,7 +7,8 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
 import type { Identity } from "../../config.js";
 import { getProjectIdentity, projectDir } from "../projectFs.js";
-import { isTunnelRequest, resolveGuest } from "../shareAuth.js";
+import { verifyHostCookie } from "../hostAuth.js";
+import { requestLane, resolveGuest } from "../shareAuth.js";
 import { getOrCreateRoom, releaseRoomIfEmpty, type ProjectRoom } from "./room.js";
 
 const messageSync = 0;
@@ -113,7 +114,8 @@ export function attachCollabServer(httpServer: HttpServer): WebSocketServer {
       let identity: Identity | undefined;
       let readOnly = false;
       let branchId = parsed.branchId;
-      if (isTunnelRequest(req)) {
+      const lane = requestLane(req);
+      if (lane.kind === "share") {
         // Guest via share link: identity comes from the signed-in guest, never from the URL.
         // Bound branch stays editable (unless share is RO). Other branches are observe-only
         // so guests can watch live uncommitted leaves across the multiverse.
@@ -131,8 +133,17 @@ export function attachCollabServer(httpServer: HttpServer): WebSocketServer {
         const requested = parsed.branchId || bound;
         branchId = requested;
         readOnly = r.session.settings.readOnly || requested !== bound;
-      } else {
+      } else if (lane.kind === "host-gateway") {
+        if (!verifyHostCookie(req)) {
+          rejectUpgrade(socket, 401, "Unauthorized");
+          return;
+        }
         identity = await getProjectIdentity(parsed.projectId, parsed.identityId);
+      } else if (lane.kind === "local") {
+        identity = await getProjectIdentity(parsed.projectId, parsed.identityId);
+      } else {
+        rejectUpgrade(socket, 401, "Unauthorized");
+        return;
       }
       if (!identity) {
         rejectUpgrade(socket, 403, "Forbidden");

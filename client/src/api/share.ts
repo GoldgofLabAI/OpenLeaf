@@ -35,6 +35,20 @@ export type ShareAiCollaboratorView = {
   revoked: boolean;
   compileCount: number;
   writeCount: number;
+  mintedBy?: { kind: "host" } | { kind: "guest"; guestId: string; guestName: string };
+};
+
+export type AiGatewayView = {
+  url: string;
+  hostname: string;
+  status: "starting" | "active" | "stopped" | "error";
+  dnsReady: boolean;
+  localOnly: boolean;
+};
+
+export type AiLinksResponse = {
+  gateway: AiGatewayView;
+  collaborators: ShareAiCollaboratorView[];
 };
 
 export type ShareSessionView = {
@@ -107,7 +121,8 @@ export type GuestShareInfo = {
 export type GuestIdentity = { id: string; name: string; color: string };
 
 export type GuestMe =
-  | { mode: "host" }
+  | { mode: "host"; remote?: boolean; username?: string }
+  | { mode: "host-login" }
   | { mode: "guest"; active: false; reason: "no-session" | "expired" }
   | { mode: "guest"; active: true; authenticated: false; linkOk: boolean; share: GuestShareInfo }
   | { mode: "guest"; active: true; authenticated: true; share: GuestShareInfo; guest: GuestIdentity };
@@ -115,6 +130,7 @@ export type GuestMe =
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
@@ -175,15 +191,20 @@ export type MintAiCollaboratorResponse = {
   ai: ShareAiCollaboratorView & { token: string };
   aiUrl: string;
   starterPrompt: string;
-  session: ShareSessionView;
-  sessions: ShareSessionView[];
+  gateway: AiGatewayView;
+  collaborators: ShareAiCollaboratorView[];
 };
+
+export function listProjectAiLinks(projectId: string, parentBranchId?: string): Promise<AiLinksResponse> {
+  const q = parentBranchId ? `?parentBranchId=${encodeURIComponent(parentBranchId)}` : "";
+  return request(`/api/projects/${encodeURIComponent(projectId)}/ai${q}`);
+}
 
 export function mintAiCollaborator(
   projectId: string,
-  input: { branchId: string; slug: string; ttlMinutes?: number | null },
+  input: { branchId: string; slug: string; ttlMinutes?: number | null; fromNodeId?: string | null },
 ): Promise<MintAiCollaboratorResponse> {
-  return request(`/api/projects/${encodeURIComponent(projectId)}/share/ai`, {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/ai`, {
     method: "POST",
     body: JSON.stringify(input),
   });
@@ -192,12 +213,93 @@ export function mintAiCollaborator(
 export function revokeAiCollaborator(
   projectId: string,
   aiId: string,
-  branchId: string,
-): Promise<{ ok: boolean; session?: ShareSessionView; sessions: ShareSessionView[] }> {
-  return request(
-    `/api/projects/${encodeURIComponent(projectId)}/share/ai/${encodeURIComponent(aiId)}?branchId=${encodeURIComponent(branchId)}`,
-    { method: "DELETE" },
-  );
+): Promise<{ ok: boolean } & AiLinksResponse> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/ai/${encodeURIComponent(aiId)}`, {
+    method: "DELETE",
+  });
+}
+
+export type AiReviewLine = { kind: "context" | "add" | "del"; text: string };
+
+export type AiReviewInline = { kind: "eq" | "add" | "del"; text: string };
+
+export type AiReviewRange = {
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+};
+
+export type AiReviewHunk = {
+  id: string;
+  path: string;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  additions: number;
+  deletions: number;
+  lines: AiReviewLine[];
+  inline?: AiReviewInline[];
+  ranges?: AiReviewRange[];
+  phraseBefore?: string;
+  phraseAfter?: string;
+  kind?: "replace" | "insert" | "delete";
+};
+
+export type AiReviewFile = {
+  path: string;
+  status: "modified" | "added" | "deleted";
+  additions: number;
+  deletions: number;
+  hunks: AiReviewHunk[];
+};
+
+export type AiReviewCollaborator = {
+  aiId: string;
+  slug: string;
+  branchId: string;
+  branchName: string;
+  parentBranchName: string;
+  hunkCount: number;
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  files: AiReviewFile[];
+};
+
+export type AiReviewList = {
+  collaborators: AiReviewCollaborator[];
+  hunkCount: number;
+  fileCount: number;
+};
+
+export function listProjectAiReview(projectId: string): Promise<AiReviewList> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/ai/review`);
+}
+
+export type AiReviewAction = { hunkId?: string; path?: string; all?: boolean };
+
+export function acceptAiReview(
+  projectId: string,
+  aiId: string,
+  body: AiReviewAction,
+): Promise<AiReviewCollaborator> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/ai/${encodeURIComponent(aiId)}/review/accept`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function rejectAiReview(
+  projectId: string,
+  aiId: string,
+  body: AiReviewAction,
+): Promise<AiReviewCollaborator> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/ai/${encodeURIComponent(aiId)}/review/reject`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export function listShares(): Promise<{
@@ -223,4 +325,24 @@ export function guestLogin(body: {
 
 export function guestLogout(): Promise<{ ok: boolean }> {
   return request("/api/guest/logout", { method: "POST", body: "{}" });
+}
+
+export type HostGatewayView = {
+  url: string;
+  hostname: string;
+  status: "starting" | "active" | "stopped" | "error";
+  dnsReady: boolean;
+  localOnly: boolean;
+};
+
+export function hostLogin(body: { username: string; password: string }): Promise<{ ok: boolean; username: string }> {
+  return request("/api/host/login", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function hostLogout(): Promise<{ ok: boolean }> {
+  return request("/api/host/logout", { method: "POST", body: "{}" });
+}
+
+export function hostGateway(): Promise<HostGatewayView> {
+  return request("/api/host/gateway");
 }

@@ -26,6 +26,8 @@ export type ProjectCollab = {
   commentsVersion: number;
   /** Cross-branch leaf +/- bump — any branch flush in this project. */
   leavesVersion: number;
+  /** Bumped when an AI sandbox writes pending review hunks. */
+  aiReviewVersion: number;
 };
 
 function collabWsBase(): string {
@@ -52,6 +54,7 @@ export function useProjectCollab(
   const [treeEventPaths, setTreeEventPaths] = useState<string[]>([]);
   const [commentsVersion, setCommentsVersion] = useState(0);
   const [leavesVersion, setLeavesVersion] = useState(0);
+  const [aiReviewVersion, setAiReviewVersion] = useState(0);
   const [session, setSession] = useState<{
     doc: Y.Doc;
     awareness: Awareness;
@@ -180,6 +183,8 @@ export function useProjectCollab(
       if (typeof cv === "number") setCommentsVersion(cv);
       const lv = meta.get("leavesVersion");
       if (typeof lv === "number") setLeavesVersion(lv);
+      const rv = meta.get("aiReviewVersion");
+      if (typeof rv === "number") setAiReviewVersion(rv);
     };
     const onFiles = () => setFilesTick((n) => n + 1);
 
@@ -252,6 +257,7 @@ export function useProjectCollab(
     treeEventPaths,
     commentsVersion,
     leavesVersion,
+    aiReviewVersion,
   };
 }
 

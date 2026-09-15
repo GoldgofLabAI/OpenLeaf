@@ -18,6 +18,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   try {
     res = await fetch(url, {
       ...init,
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
         ...(init?.headers ?? {}),
@@ -527,6 +528,7 @@ export function compileProject(
     if (opts?.branchId) params.set("branchId", opts.branchId);
     fetch(`/api/projects/${encodeURIComponent(id)}/compile?${params}`, {
       method: "POST",
+      credentials: "include",
       headers: { Accept: "text/event-stream" },
     })
       .then(async (res) => {

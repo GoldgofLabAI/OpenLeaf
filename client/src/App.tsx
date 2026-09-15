@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { EditorPage } from "./pages/EditorPage";
 import { GuestInactive, GuestLogin } from "./pages/GuestLogin";
+import { HostLogin } from "./pages/HostLogin";
 import { ProjectList } from "./pages/ProjectList";
 import { useSession } from "./session/SessionContext";
 
@@ -11,6 +12,7 @@ export function App() {
     return <div className="guest-shell guest-loading">Loading…</div>;
   }
 
+  if (session.kind === "host-login") return <HostLogin />;
   // Arrived through a share link: only that one project exists as far as this tab is concerned.
   if (session.kind === "guest-inactive") return <GuestInactive reason={session.reason} />;
   if (session.kind === "guest-login") return <GuestLogin share={session.share} linkOk={session.linkOk} />;

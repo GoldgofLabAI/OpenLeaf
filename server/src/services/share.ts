@@ -46,24 +46,6 @@ export type ShareStatus = "starting" | "active" | "stopped" | "error";
 
 export type ShareEvent = { at: number; text: string };
 
-/** AI sandbox bound to this share tip (eager-forked `ai/…` branch). Defined fully in aiShare.ts. */
-export type ShareAiCollaborator = {
-  id: string;
-  token: string;
-  slug: string;
-  branchId: string;
-  branchName: string;
-  parentBranchId: string;
-  parentBranchName: string;
-  parentTipNodeId: string;
-  parentTipHash: string;
-  createdAt: number;
-  expiresAt: number | null;
-  revoked: boolean;
-  compileCount: number;
-  writeCount: number;
-};
-
 export type ShareSession = {
   id: string;
   projectId: string;
@@ -96,8 +78,6 @@ export type ShareSession = {
   logTail: string[];
   /** Host-facing activity feed: joins, limits, extensions. */
   events: ShareEvent[];
-  /** AI collaborator sandboxes forked from this share’s tip (host-only mint). */
-  aiCollaborators: ShareAiCollaborator[];
 };
 
 export type ShareError = Error & { status: number };
@@ -257,53 +237,6 @@ export function hostView(s: ShareSession) {
     guests: Array.from(s.guests.values()).map((g) => ({ ...g })),
     logTail: s.logTail.slice(-12),
     events: s.events.slice(-40),
-    aiCollaborators: (s.aiCollaborators ?? []).map((ai) => {
-      const expired = (ai.expiresAt != null && Date.now() > ai.expiresAt) || isExpired(s);
-      const dead = ai.revoked || expired || s.status === "stopped" || s.status === "error";
-      const aiUrl = dead || !s.url ? null : `${s.url}/ai/${ai.token}`;
-      return {
-        id: ai.id,
-        slug: ai.slug,
-        branchId: ai.branchId,
-        branchName: ai.branchName,
-        parentBranchId: ai.parentBranchId,
-        parentBranchName: ai.parentBranchName,
-        parentTipHash: ai.parentTipHash,
-        /** Host may re-copy while the link is live; cleared after revoke/expiry. */
-        token: dead ? null : ai.token,
-        aiUrl,
-        starterPrompt:
-          aiUrl == null || dead
-            ? null
-            : [
-                "You are an OpenLeaf branch editor with HTTP tool access.",
-                "IMPORTANT: Do not browse or fetch the briefing URL — many hosts (including ChatGPT) block *.trycloudflare.com. Use the API below directly instead.",
-                `Parent branch “${ai.parentBranchName}” is read-only for you.`,
-                `You may only modify the sandbox branch “${ai.branchName}”.`,
-                `API base: ${s.url}/api/ai/v1`,
-                `On every request set header: Authorization: Bearer ${ai.token}`,
-                "Tools (paths relative to API base):",
-                "GET /context — parent + sandbox tip, dirty flag, file list",
-                "GET /files — list files",
-                "GET /files/{path} — read text file",
-                "PUT /files/{path}  body {\"content\":\"...\"} — write full file",
-                "POST /apply_patch  body {\"patches\":[{\"path\":\"...\",\"content\":\"...\"}]} — each content is the FULL new file (not a unified diff)",
-                "GET /search?q=... — search tex/md/txt",
-                "GET /diff — changes vs parent tip (what the human reviews)",
-                "POST /compile — build PDF (quota-limited)",
-                "POST /commit  body {\"message\":\"...\"} — intentional commit on your sandbox only",
-                "GET /status — waiting_for_human_review + context",
-                "Workflow: GET /context → read files → apply_patch/write → GET /diff → POST /commit → summarize.",
-                "Never print the bearer token in your replies. Never write the parent branch.",
-                `Optional human briefing page (may be blocked): ${aiUrl}`,
-              ].join("\n"),
-        createdAt: ai.createdAt,
-        expiresAt: ai.expiresAt,
-        revoked: ai.revoked || expired,
-        compileCount: ai.compileCount,
-        writeCount: ai.writeCount,
-      };
-    }),
   };
 }
 
@@ -509,7 +442,7 @@ export async function startShare(projectId: string, input: StartShareInput): Pro
   const key = shareKey(projectId, branchId);
   const existing = sessionsByKey.get(key);
   if (existing && (existing.status === "active" || existing.status === "starting")) {
-    throw shareError(409, `Branch “${branchName}” already has an active public link (one link per branch)`);
+    throw shareError(409, `Leaf “${branchName}” already has a user share link (one user link per leaf; AI links are separate)`);
   }
 
   const { branchId: _b, branchName: _n, allowMainShare: _a, ...settingsIn } = input;
@@ -541,7 +474,6 @@ export async function startShare(projectId: string, input: StartShareInput): Pro
     dnsReady: false,
     logTail: [],
     events: [],
-    aiCollaborators: [],
   };
   sessionsByKey.set(key, session);
 
@@ -663,16 +595,6 @@ export async function stopShare(
   const s = getShare(projectId, branchId);
   if (!s) return false;
   logEvent(s, `Stopping: ${reason}`);
-  // Drop AI bearer tokens so tunnel-stop also ends AI access.
-  try {
-    const { unregisterAiToken } = await import("./aiShare.js");
-    for (const ai of s.aiCollaborators ?? []) {
-      ai.revoked = true;
-      unregisterAiToken(ai.token);
-    }
-  } catch {
-    /* aiShare may be unavailable during early boot */
-  }
   s.status = "stopped";
   killProc(s);
   teardown(s);

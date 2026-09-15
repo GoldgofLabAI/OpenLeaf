@@ -689,6 +689,13 @@ export class ProjectRoom {
     }, "leaves");
   }
 
+  /** Host AI-review panel: pending hunks on a sandbox fork. */
+  bumpAiReviewVersion(version = Date.now()): void {
+    this.doc.transact(() => {
+      this.meta.set("aiReviewVersion", version);
+    }, "ai-review");
+  }
+
   private startDiskWatch(): void {
     if (this.destroyed || this.closing || this.diskWatch) return;
     this.diskWatch = new ProjectDiskWatch(this.projectId, this.rootDir, (paths) => {
@@ -939,6 +946,26 @@ export function notifyProjectCommentsChanged(projectId: string, branchId?: strin
 export function bumpProjectLeavesVersion(projectId: string): void {
   const v = Date.now();
   for (const room of getProjectRooms(projectId)) room.bumpLeavesVersion(v);
+}
+
+/** Fan-out so the host review panel refreshes when an AI sandbox mutates. */
+export function notifyProjectAiReview(projectId: string): void {
+  const v = Date.now();
+  for (const room of getProjectRooms(projectId)) room.bumpAiReviewVersion(v);
+}
+
+/**
+ * Fold sandbox disk writes into a live CRDT (3-way merge if the host is typing).
+ * No-op when nobody has that branch room open.
+ */
+export async function ingestProjectDiskPaths(
+  projectId: string,
+  paths: string[],
+  branchId: string,
+): Promise<void> {
+  const room = getRoom(projectId, branchId);
+  if (!room || paths.length === 0) return;
+  await room.ingestDiskPaths(paths);
 }
 
 export async function releaseRoomIfEmpty(projectId: string, branchId = "main"): Promise<void> {

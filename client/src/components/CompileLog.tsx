@@ -3,11 +3,12 @@ type Props = {
   open: boolean;
   onToggle: () => void;
   height: number;
+  className?: string;
 };
 
-export function CompileLog({ log, open, onToggle, height }: Props) {
+export function CompileLog({ log, open, onToggle, height, className }: Props) {
   return (
-    <div className="compile-log" style={{ height: open ? height : 36, flex: "0 0 auto" }}>
+    <div className={`compile-log${className ? ` ${className}` : ""}`} style={{ height: open ? height : 36, flex: "0 0 auto" }}>
       <div className="compile-log-bar">
         <span>Compile log</span>
         <button type="button" className="btn btn-ghost" style={{ color: "#d7e0ea", borderColor: "#2a3644" }} onClick={onToggle}>

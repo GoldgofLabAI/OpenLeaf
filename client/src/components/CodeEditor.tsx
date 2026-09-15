@@ -1,5 +1,5 @@
 import Editor, { type BeforeMount, type OnMount } from "@monaco-editor/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { editor as monacoEditor, type editor } from "monaco-editor";
 import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
@@ -13,6 +13,7 @@ import {
   setLatexSuggestContext,
 } from "../latex/register";
 import { useTheme } from "../theme";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 export type EditorJumpTarget = {
   /** When set, jump applies only after this file is open */
@@ -20,6 +21,14 @@ export type EditorJumpTarget = {
   line: number;
   column: number;
   nonce?: number;
+};
+
+export type EditorSuggestionMark = {
+  id: string;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
 };
 
 export type CommentMark = {
@@ -69,6 +78,13 @@ type Props = {
   onOpenCommentThread?: (threadId: string) => void;
   /** Cursor-style show-changes decorations for the open file */
   changeMarks?: EditorChangeMarks;
+  /** Grammarly-style AI suggestion underlines in the open buffer */
+  suggestionMarks?: EditorSuggestionMark[];
+  activeSuggestionId?: string | null;
+  onSelectSuggestion?: (id: string) => void;
+  suggestionPopup?: ReactNode;
+  /** Pin the suggestion card to the bottom of the editor (phones). */
+  suggestionDock?: boolean;
 };
 
 function languageFor(path: string | null): string {
@@ -112,6 +128,19 @@ function jumpKey(target: EditorJumpTarget): string {
   return `${target.nonce ?? 0}|${target.path ?? ""}|${target.line}|${target.column}`;
 }
 
+function positionInMark(
+  pos: { lineNumber: number; column: number },
+  m: EditorSuggestionMark,
+): boolean {
+  if (pos.lineNumber < m.startLine || pos.lineNumber > m.endLine) return false;
+  if (m.startLine === m.endLine) {
+    return pos.column >= m.startColumn && pos.column <= Math.max(m.endColumn, m.startColumn);
+  }
+  if (pos.lineNumber === m.startLine) return pos.column >= m.startColumn;
+  if (pos.lineNumber === m.endLine) return pos.column <= m.endColumn;
+  return true;
+}
+
 export function CodeEditor({
   path,
   value = "",
@@ -128,13 +157,26 @@ export function CodeEditor({
   onRequestComment,
   onOpenCommentThread,
   changeMarks = null,
+  suggestionMarks = [],
+  activeSuggestionId = null,
+  onSelectSuggestion,
+  suggestionPopup = null,
+  suggestionDock = false,
 }: Props) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
   const decoRef = useRef<string[]>([]);
   const commentDecoRef = useRef<string[]>([]);
   const changeDecoRef = useRef<string[]>([]);
+  const suggestDecoRef = useRef<string[]>([]);
   const changeZoneIdsRef = useRef<string[]>([]);
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const suggestionMarksRef = useRef(suggestionMarks);
+  suggestionMarksRef.current = suggestionMarks;
+  const selectSuggestionRef = useRef(onSelectSuggestion);
+  selectSuggestionRef.current = onSelectSuggestion;
+  const [popupPos, setPopupPos] = useState<{ top: number; left: number } | null>(null);
+  const narrow = useMediaQuery("(max-width: 720px)");
   const decoTimerRef = useRef<number | null>(null);
   const forwardRef = useRef(onForwardSearch);
   forwardRef.current = onForwardSearch;
@@ -178,7 +220,8 @@ export function CodeEditor({
 
   const centerOnLine = (ed: editor.IStandaloneCodeEditor, line: number, column: number) => {
     ed.layout();
-    ed.revealLineInCenter(line);
+    if (suggestionDock) ed.revealLineNearTop(line);
+    else ed.revealLineInCenter(line);
     ed.setPosition({ lineNumber: line, column });
     ed.focus();
   };
@@ -264,7 +307,7 @@ export function CodeEditor({
     ed.onMouseDown((e) => {
       // Gutter comment glyph → open that thread
       const t = e.target;
-      const detail = t as { element?: Element | null; position?: { lineNumber: number } | null };
+      const detail = t as { element?: Element | null; position?: { lineNumber: number; column?: number } | null };
       const el = detail.element;
       if (el?.classList?.contains("comment-line-glyph") || el?.closest?.(".comment-line-glyph")) {
         const line = detail.position?.lineNumber;
@@ -278,13 +321,73 @@ export function CodeEditor({
           }
         }
       }
+      const pos = e.target.position;
+      if (pos && selectSuggestionRef.current) {
+        const hit = suggestionMarksRef.current.find((m) => positionInMark(pos, m));
+        if (hit) {
+          selectSuggestionRef.current(hit.id);
+        }
+      }
       if (!e.event.ctrlKey && !e.event.metaKey) return;
       if (!e.target.position || !forwardRef.current) return;
       e.event.preventDefault();
       e.event.stopPropagation();
       forwardRef.current(e.target.position.lineNumber, e.target.position.column);
     });
+
+    // Remeasure as soon as the editor exists — web fonts may still be swapping in.
+    const remountFonts = () => {
+      try {
+        monacoApi.editor.remeasureFonts();
+      } catch {
+        /* older monaco */
+      }
+      ed.layout();
+    };
+    remountFonts();
+    void (async () => {
+      try {
+        await document.fonts?.load?.('13px "JetBrains Mono"');
+        await document.fonts?.ready;
+      } catch {
+        /* ignore */
+      }
+      remountFonts();
+    })();
   };
+
+  // Keep caret geometry honest for solo + collab: remount fonts whenever the
+  // editor is live (not only when a Yjs binding mounts).
+  useEffect(() => {
+    if (!editorReady) return;
+    const ed = editorRef.current;
+    const monacoApi = monacoRef.current;
+    if (!ed || !monacoApi) return;
+
+    const remountFonts = () => {
+      try {
+        monacoApi.editor.remeasureFonts();
+      } catch {
+        /* older monaco */
+      }
+      ed.layout();
+    };
+    remountFonts();
+    const fonts = document.fonts;
+    const onResize = () => remountFonts();
+    window.addEventListener("focus", remountFonts);
+    window.addEventListener("resize", onResize);
+    fonts?.addEventListener?.("loadingdone", remountFonts);
+    const t1 = window.setTimeout(remountFonts, 100);
+    const t2 = window.setTimeout(remountFonts, 500);
+    return () => {
+      window.removeEventListener("focus", remountFonts);
+      window.removeEventListener("resize", onResize);
+      fonts?.removeEventListener?.("loadingdone", remountFonts);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, [editorReady, path]);
 
   // Pane-title “Comment” button → same path as ⌘⌥M
   useEffect(() => {
@@ -487,6 +590,97 @@ export function CodeEditor({
     };
   }, [changeMarks, editorReady, path]);
 
+  // Grammarly-style underlines for pending AI suggestions
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (!ed || !editorReady) return;
+    const model = ed.getModel();
+    if (!model) {
+      suggestDecoRef.current = [];
+      return;
+    }
+    suggestDecoRef.current = ed.deltaDecorations(
+      suggestDecoRef.current,
+      suggestionMarks.map((m) => {
+        const startLine = Math.min(Math.max(1, m.startLine), model.getLineCount());
+        const endLine = Math.min(Math.max(1, m.endLine), model.getLineCount());
+        const startColumn = Math.max(1, m.startColumn);
+        const endColumn = Math.max(startColumn, m.endColumn);
+        return {
+          range: {
+            startLineNumber: startLine,
+            startColumn,
+            endLineNumber: endLine,
+            endColumn: Math.min(endColumn, model.getLineMaxColumn(endLine)),
+          },
+          options: {
+            inlineClassName:
+              m.id === activeSuggestionId ? "ai-suggest-mark is-active" : "ai-suggest-mark",
+            overviewRuler: {
+              color: "#7C3AED",
+              position: monacoEditor.OverviewRulerLane.Right,
+            },
+            minimap: {
+              color: "#7C3AED",
+              position: monacoEditor.MinimapPosition.Inline,
+            },
+            hoverMessage: { value: "AI suggestion — click to review" },
+          },
+        };
+      }),
+    );
+    return () => {
+      try {
+        suggestDecoRef.current = ed.deltaDecorations(suggestDecoRef.current, []);
+      } catch {
+        suggestDecoRef.current = [];
+      }
+    };
+  }, [suggestionMarks, activeSuggestionId, editorReady, path]);
+
+  useEffect(() => {
+    if (suggestionDock) {
+      setPopupPos(suggestionPopup && activeSuggestionId ? { top: 0, left: 0 } : null);
+      return;
+    }
+    const ed = editorRef.current;
+    if (!ed || !editorReady || !activeSuggestionId || !suggestionPopup) {
+      setPopupPos(null);
+      return;
+    }
+    const mark = suggestionMarks.find((m) => m.id === activeSuggestionId);
+    if (!mark) {
+      setPopupPos(null);
+      return;
+    }
+
+    const place = () => {
+      const visible = ed.getScrolledVisiblePosition({
+        lineNumber: mark.startLine,
+        column: mark.startColumn,
+      });
+      const host = hostRef.current;
+      if (!visible || !host) {
+        setPopupPos(null);
+        return;
+      }
+      const rect = host.getBoundingClientRect();
+      const top = Math.min(Math.max(8, visible.top + visible.height + 6), Math.max(8, rect.height - 160));
+      const left = Math.min(Math.max(8, visible.left), Math.max(8, rect.width - 280));
+      setPopupPos({ top, left });
+    };
+
+    place();
+    const sub = ed.onDidScrollChange(place);
+    const sub2 = ed.onDidLayoutChange(place);
+    window.addEventListener("resize", place);
+    return () => {
+      sub.dispose();
+      sub2.dispose();
+      window.removeEventListener("resize", place);
+    };
+  }, [activeSuggestionId, suggestionMarks, suggestionPopup, editorReady, path, suggestionDock]);
+
   // Collaborative text: LF-safe binder (see bindYTextToMonaco). Stock y-monaco
   // leaves the local caret one character off for Windows guests.
   useEffect(() => {
@@ -509,8 +703,8 @@ export function CodeEditor({
     bindingRef.current = binding;
     forceModelLf(model, monacoApi);
 
-    // Custom fonts load async; until metrics match, the caret paints at the
-    // wrong x-position even when the model offsets are correct.
+    // Web fonts (JetBrains Mono) load async. Until glyph metrics match what Monaco
+    // measured at mount, the painted caret x-position drifts from the click target.
     const remountFonts = () => {
       try {
         monacoApi.editor.remeasureFonts();
@@ -520,11 +714,27 @@ export function CodeEditor({
       ed.layout();
     };
     remountFonts();
-    void document.fonts?.ready?.then(remountFonts);
+    const fonts = document.fonts;
+    const waitFonts = async () => {
+      try {
+        await fonts?.load?.('400 13px "JetBrains Mono"');
+        await fonts?.load?.('500 13px "JetBrains Mono"');
+        await fonts?.ready;
+      } catch {
+        /* ignore */
+      }
+      remountFonts();
+    };
+    void waitFonts();
+    const onResize = () => remountFonts();
     window.addEventListener("focus", remountFonts);
+    window.addEventListener("resize", onResize);
+    fonts?.addEventListener?.("loadingdone", remountFonts);
 
     return () => {
       window.removeEventListener("focus", remountFonts);
+      window.removeEventListener("resize", onResize);
+      fonts?.removeEventListener?.("loadingdone", remountFonts);
       binding.destroy();
       if (bindingRef.current === binding) bindingRef.current = null;
       queueMicrotask(() => {
@@ -585,7 +795,7 @@ export function CodeEditor({
   }
 
   return (
-    <div className="monaco-host">
+    <div className="monaco-host" ref={hostRef}>
       <Editor
         path={path}
         // In collab mode MonacoBinding owns the model content — keep value undefined-ish
@@ -598,18 +808,23 @@ export function CodeEditor({
         theme={monacoTheme}
         options={{
           readOnly,
-          fontFamily: "JetBrains Mono, Consolas, Menlo, Monaco, monospace",
-          fontSize: 13,
-          lineHeight: 20,
+          // Quote the family so metrics resolve to the same face CSS uses.
+          fontFamily: '"JetBrains Mono", ui-monospace, Consolas, Menlo, Monaco, monospace',
+          fontSize: narrow ? 16 : 13,
+          lineHeight: narrow ? 24 : 20,
+          letterSpacing: 0,
           cursorStyle: "line",
           cursorWidth: 2,
           cursorSmoothCaretAnimation: "off",
+          // Web-font metrics often disagree with Monaco's monospace fast-path,
+          // which paints the caret at the wrong x even when offsets are correct.
+          disableMonospaceOptimizations: true,
           minimap: { enabled: false },
           wordWrap: "on",
           scrollBeyondLastLine: true,
           automaticLayout: true,
-          padding: { top: 12, bottom: 48 },
-          renderLineHighlight: "all",
+          padding: { top: 12, bottom: suggestionDock && suggestionPopup ? 220 : 48 },
+          renderLineHighlight: "line",
           tabSize: 2,
           // Bracket match draws hollow boxes on `{` / `}` that look like a second
           // caret sitting next to yours — turn them off so only the real caret shows.
@@ -635,6 +850,15 @@ export function CodeEditor({
           autoClosingBrackets: "languageDefined",
         }}
       />
+      {suggestionPopup && popupPos && (
+        <div
+          className={`ai-gram-pop${suggestionDock ? " is-docked" : ""}`}
+          style={suggestionDock ? undefined : { top: popupPos.top, left: popupPos.left }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {suggestionPopup}
+        </div>
+      )}
     </div>
   );
 }

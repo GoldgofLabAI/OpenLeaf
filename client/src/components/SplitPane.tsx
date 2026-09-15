@@ -7,6 +7,7 @@ type Props = {
   minLeft?: number;
   minRight?: number;
   storageKey?: string;
+  className?: string;
 };
 
 export function SplitPane({
@@ -16,6 +17,7 @@ export function SplitPane({
   minLeft = 240,
   minRight = 240,
   storageKey,
+  className,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [ratio, setRatio] = useState(() => {
@@ -33,15 +35,12 @@ export function SplitPane({
   useEffect(() => {
     if (!dragging) return;
 
-    const onMove = (e: MouseEvent) => {
+    const onMove = (e: PointerEvent) => {
       const el = containerRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const clamped = Math.min(
-        rect.width - minRight,
-        Math.max(minLeft, x),
-      );
+      const clamped = Math.min(rect.width - minRight, Math.max(minLeft, x));
       setRatio(clamped / rect.width);
     };
 
@@ -50,13 +49,15 @@ export function SplitPane({
       if (storageKey) localStorage.setItem(storageKey, String(ratio));
     };
 
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
@@ -69,13 +70,16 @@ export function SplitPane({
   }, [dragging, ratio, storageKey]);
 
   return (
-    <div className="split-row" ref={containerRef}>
+    <div className={`split-row${className ? ` ${className}` : ""}`} ref={containerRef}>
       <div className="pane" style={{ flex: `0 0 ${ratio * 100}%` }}>
         {left}
       </div>
       <div
         className={`split-handle${dragging ? " active" : ""}`}
-        onMouseDown={() => setDragging(true)}
+        onPointerDown={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
         role="separator"
         aria-orientation="vertical"
         aria-valuenow={Math.round(ratio * 100)}
