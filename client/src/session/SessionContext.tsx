@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { guestMe, type GuestIdentity, type GuestMe, type GuestShareInfo } from "../api/share";
+import { sessionAfterMeFailure } from "./sessionState";
 
 /**
  * Who is using this browser tab: the machine owner (host, full UI) or a guest
@@ -35,7 +36,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     } catch {
       // Keep an established guest or host-login session if the probe fails
       // (network blip). Only the first load may fall back to local host.
-      setSession((prev) => (prev.kind === "loading" ? { kind: "host", remote: false } : prev));
+      setSession((prev) => sessionAfterMeFailure(prev));
     }
   }, []);
 

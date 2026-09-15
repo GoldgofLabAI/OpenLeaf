@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { applyMergeTipPick, type MergeDraft } from "../../../client/src/components/mergeCompose.ts";
+import { nextTimelineEscape } from "../../../client/src/components/timelineEscape.ts";
 
 describe("applyMergeTipPick", () => {
   it("advances to Into after choosing From when Into was prefilled", () => {
@@ -27,5 +28,20 @@ describe("applyMergeTipPick", () => {
     assert.equal(next.draft.intoBranchId, "results");
     assert.equal(next.draft.fromBranchId, "methods");
     assert.equal(next.draft.filling, "into");
+  });
+});
+
+describe("nextTimelineEscape", () => {
+  const idle = { deleteOpen: false, forkOpen: false, mergeDraft: false, dockOpen: false };
+
+  it("closes the drawer when no inner chrome is open", () => {
+    assert.equal(nextTimelineEscape(idle), "close-panel");
+  });
+
+  it("peels innermost chrome before the drawer", () => {
+    assert.equal(nextTimelineEscape({ ...idle, deleteOpen: true, forkOpen: true, mergeDraft: true, dockOpen: true }), "close-delete");
+    assert.equal(nextTimelineEscape({ ...idle, forkOpen: true, mergeDraft: true }), "close-fork");
+    assert.equal(nextTimelineEscape({ ...idle, mergeDraft: true, dockOpen: true }), "cancel-merge");
+    assert.equal(nextTimelineEscape({ ...idle, dockOpen: true }), "dismiss-dock");
   });
 });
