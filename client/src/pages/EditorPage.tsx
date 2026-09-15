@@ -211,7 +211,8 @@ export function EditorPage() {
   const [timelineCanEdit, setTimelineCanEdit] = useState(true);
   const [viewingGitHash, setViewingGitHash] = useState<string | null>(null);
   const [branchLabel, setBranchLabel] = useState(guest?.share.branchName || "main");
-  const collab = useProjectCollab(id || undefined, guestIdentity, branchId);
+  const [project, setProject] = useState<ProjectMeta | null>(null);
+  const collab = useProjectCollab(project?.id === id ? id || undefined : undefined, guestIdentity, branchId);
   const [shareOpen, setShareOpen] = useState(false);
   const [aiLinksOpen, setAiLinksOpen] = useState(false);
   const [shareActive, setShareActive] = useState(false);
@@ -258,7 +259,6 @@ export function EditorPage() {
     return () => window.clearInterval(t);
   }, [shareActive, shareExpiresAt]);
 
-  const [project, setProject] = useState<ProjectMeta | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -459,16 +459,19 @@ export function EditorPage() {
 
   useEffect(() => {
     if (!id) return;
+    setError(null);
     (async () => {
       try {
         // Guests cannot read the server config (host-only); defaults apply.
-        const [p, t, cfg] = await Promise.all([getProject(id), getTree(id, null, guestBranchId || "main"), isGuest ? null : getConfig()]);
+        const p = await getProject(id);
+        const [t, cfg] = await Promise.all([getTree(id, null, guestBranchId || "main"), isGuest ? null : getConfig()]);
         setProject(p);
         setTree(t);
         setConfig(cfg);
         setActivePath(p.mainFile);
         await loadIndexHints(id, t);
       } catch (err) {
+        setProject(null);
         setError(err instanceof Error ? err.message : "Failed to open project");
       }
     })();
@@ -514,7 +517,7 @@ export function EditorPage() {
 
   // Keep gutter marks / toolbar count fresh (panel may be closed)
   useEffect(() => {
-    if (!id) return;
+    if (!id || project?.id !== id) return;
     let cancelled = false;
     (async () => {
       try {
@@ -527,10 +530,10 @@ export function EditorPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, collab.commentsVersion]);
+  }, [id, project?.id, collab.commentsVersion]);
 
   useEffect(() => {
-    if (!id || isGuest) {
+    if (!id || isGuest || project?.id !== id) {
       setAiReviewCount(0);
       setAiCollabs([]);
       return;
@@ -550,10 +553,10 @@ export function EditorPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, isGuest, collab.aiReviewVersion]);
+  }, [id, isGuest, project?.id, collab.aiReviewVersion]);
 
   useEffect(() => {
-    if (!id || isGuest) return;
+    if (!id || isGuest || project?.id !== id) return;
     const t = window.setInterval(() => {
       void listProjectAiReview(id)
         .then((data) => {
@@ -563,7 +566,7 @@ export function EditorPage() {
         .catch(() => undefined);
     }, 5000);
     return () => window.clearInterval(t);
-  }, [id, isGuest]);
+  }, [id, isGuest, project?.id]);
 
   useEffect(() => {
     if (!id) {
@@ -990,7 +993,7 @@ export function EditorPage() {
   // Each branch tip has its own build artifacts. When you land on a tip with no PDF yet,
   // compile automatically — don't leave a blank/error pane that requires knowing to hit Recompile.
   useEffect(() => {
-    if (!id) return;
+    if (!id || project?.id !== id) return;
     setPdfBust(null);
     if (viewingGitHash) return; // historical leaf — no tip worktree PDF to ensure
     if (!canCompile) return;
@@ -1015,7 +1018,7 @@ export function EditorPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, branchId, viewingGitHash, canCompile]);
+  }, [id, project?.id, branchId, viewingGitHash, canCompile]);
 
   const save = useCallback(
     async (opts?: { compile?: boolean; silent?: boolean }) => {
@@ -1136,7 +1139,7 @@ export function EditorPage() {
   );
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || project?.id !== id) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1156,10 +1159,10 @@ export function EditorPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, guestBranchId]);
+  }, [id, project?.id, guestBranchId]);
 
   useEffect(() => {
-    if (!id || isGuest) return;
+    if (!id || isGuest || project?.id !== id) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -1174,7 +1177,7 @@ export function EditorPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, isGuest]);
+  }, [id, isGuest, project?.id]);
 
   // Autosave always on for editable text/base64 buffers (no compile — keep it light).
   useEffect(() => {
@@ -1788,13 +1791,16 @@ export function EditorPage() {
     }));
   }, [collab.peers]);
 
-  if (error && !project) {
-    return (
-      <div className="home">
-        <div className="error-banner">{error}</div>
-        <Link to="/">← Back</Link>
-      </div>
-    );
+  if (!project || project.id !== id) {
+    if (error) {
+      return (
+        <div className="home">
+          <div className="error-banner">{error}</div>
+          <Link to="/">← Back</Link>
+        </div>
+      );
+    }
+    return <div className="guest-shell guest-loading">Opening project…</div>;
   }
 
   return (
@@ -2299,6 +2305,9 @@ export function EditorPage() {
               ? `Merge started — ${session.conflicts.length} conflict${session.conflicts.length === 1 ? "" : "s"} to review`
               : "Merge started — no conflicts, ready to complete",
           );
+        }}
+        onBeforeMerge={async () => {
+          await flushCollab(id, { identityId: collab.identity?.id, branchId });
         }}
         onTimelineChange={(view) => {
           // Keep timeline open so hosts can click through leaves without reopening it.

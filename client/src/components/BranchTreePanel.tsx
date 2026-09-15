@@ -16,6 +16,7 @@ import type { TimelineBranch, TimelineNode, TimelineView } from "../api/types";
 import { TimelineGraph } from "./TimelineGraph";
 import { formatWhen, isAiBranch } from "./timelineLayout";
 import { applyMergeTipPick } from "./mergeCompose";
+import { nextTimelineEscape } from "./timelineEscape";
 
 type Props = {
   projectId: string;
@@ -28,6 +29,8 @@ type Props = {
   canMerge?: boolean;
   canPrune?: boolean;
   onMergeStarted?: (session: import("../api/client").MergeSession) => void;
+  /** Flush the live editor before starting a merge so uncommitted CRDT edits hit disk. */
+  onBeforeMerge?: () => Promise<void>;
   guestBranchId?: string | null;
   leavesVersion?: number;
   onHighlightSince?: (gitHash: string) => void;
@@ -45,6 +48,7 @@ export function BranchTreePanel({
   canMerge = false,
   canPrune = true,
   onMergeStarted,
+  onBeforeMerge,
   guestBranchId = null,
   leavesVersion = 0,
   onHighlightSince,
@@ -82,13 +86,6 @@ export function BranchTreePanel({
 
   useEffect(() => {
     if (!open || (!hoveredId && !pinnedId) || mergeDraft) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        dismissDock();
-        setPinnedId(null);
-        setLeafMoreOpen(false);
-      }
-    };
     const onDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement;
       if (t.closest(".tl-hover-dock, .tl-orb, .tl-fork-modal, .tl-trash-delete-modal, .tl-trash-panel, .tl-merge-composer")) {
@@ -98,40 +95,45 @@ export function BranchTreePanel({
       setPinnedId(null);
       setLeafMoreOpen(false);
     };
-    window.addEventListener("keydown", onKey);
     window.addEventListener("mousedown", onDown);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("mousedown", onDown);
-    };
+    return () => window.removeEventListener("mousedown", onDown);
   }, [open, hoveredId, pinnedId, mergeDraft, dismissDock]);
 
   useEffect(() => {
-    if (!open || !mergeDraft) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setMergeDraft(null);
-        setError(null);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, mergeDraft]);
-
-  useEffect(() => {
-    if (!forkFrom && !deleteTarget) return;
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (deleteTarget) {
+      const action = nextTimelineEscape({
+        deleteOpen: Boolean(deleteTarget),
+        forkOpen: Boolean(forkFrom),
+        mergeDraft: Boolean(mergeDraft),
+        dockOpen: Boolean(hoveredId || pinnedId),
+      });
+      if (action === "close-delete") {
         setDeleteTarget(null);
         setDeleteConfirm("");
         return;
       }
-      setForkFrom(null);
+      if (action === "close-fork") {
+        setForkFrom(null);
+        return;
+      }
+      if (action === "cancel-merge") {
+        setMergeDraft(null);
+        setError(null);
+        return;
+      }
+      if (action === "dismiss-dock") {
+        dismissDock();
+        setPinnedId(null);
+        setLeafMoreOpen(false);
+        return;
+      }
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [forkFrom, deleteTarget]);
+  }, [open, deleteTarget, forkFrom, mergeDraft, hoveredId, pinnedId, dismissDock, onClose]);
 
   const refreshLeaves = useCallback(async () => {
     try {
@@ -391,6 +393,7 @@ export function BranchTreePanel({
     setBusy(true);
     setError(null);
     try {
+      await onBeforeMerge?.();
       if (view.activeBranchId !== intoId || view.viewingNodeId) {
         const next = await checkoutProjectTimeline(projectId, { branchId: intoId, nodeId: null });
         setView(next);

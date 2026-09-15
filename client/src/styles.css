@@ -703,7 +703,7 @@ a {
   backdrop-filter: blur(16px) saturate(1.15);
   flex-wrap: wrap;
   flex-shrink: 0;
-  z-index: 20;
+  z-index: 45;
 }
 
 .toolbar-cluster {
@@ -1299,11 +1299,10 @@ a {
 .history-drawer,
 .comments-drawer {
   position: fixed;
-  top: 0;
+  top: var(--toolbar-h);
   right: 0;
   bottom: 0;
   z-index: 40;
-  padding-top: env(safe-area-inset-top, 0);
   background: var(--glass-strong);
   border-left: 1px solid var(--line);
   box-shadow: var(--shadow-lift);
