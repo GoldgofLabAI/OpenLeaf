@@ -939,7 +939,6 @@ export function EditorPage() {
     if (!id || compileLock.current || !canCompile) return false;
     compileLock.current = true;
     const startedOn = branchIdRef.current;
-    const startedLabel = branchLabel;
     setStatus("compiling");
     const checkpointLabel = viewingGitHash
       ? `checkpoint ${viewingGitHash.slice(0, 7)}`
