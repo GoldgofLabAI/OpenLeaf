@@ -941,14 +941,17 @@ export function EditorPage() {
     const startedOn = branchIdRef.current;
     const startedLabel = branchLabel;
     setStatus("compiling");
+    const checkpointLabel = viewingGitHash
+      ? `checkpoint ${viewingGitHash.slice(0, 7)}`
+      : branchLabel;
     if (!opts?.auto) {
       setLog("");
       setLogOpen(true);
     } else {
       setLog((prev) =>
         prev
-          ? `${prev}\n\n[openleaf] Building PDF for “${startedLabel}”…\n`
-          : `[openleaf] Building PDF for “${startedLabel}”…\n`,
+          ? `${prev}\n\n[openleaf] Building PDF for “${checkpointLabel}”…\n`
+          : `[openleaf] Building PDF for “${checkpointLabel}”…\n`,
       );
     }
     try {
@@ -960,7 +963,7 @@ export function EditorPage() {
             setLog((prev) => prev + chunk);
           },
         },
-        { branchId: startedOn },
+        viewingGitHash ? { at: viewingGitHash } : { branchId: startedOn },
       );
       if (branchIdRef.current !== startedOn) return false;
       setLog((prev) => prev || result.log);
@@ -985,32 +988,34 @@ export function EditorPage() {
         void runCompileRef.current({ auto: true });
       }
     }
-  }, [id, refreshTree, canCompile, branchLabel]);
+  }, [id, refreshTree, canCompile, branchLabel, viewingGitHash]);
 
   const runCompileRef = useRef(runCompile);
   runCompileRef.current = runCompile;
 
-  // Each branch tip has its own build artifacts. When you land on a tip with no PDF yet,
-  // compile automatically — don't leave a blank/error pane that requires knowing to hit Recompile.
+  // Each tip (and each historical checkpoint) has its own build artifacts. When you land
+  // on one with no PDF yet, compile automatically.
   useEffect(() => {
     if (!id || project?.id !== id) return;
     setPdfBust(null);
-    if (viewingGitHash) return; // historical leaf — no tip worktree PDF to ensure
     if (!canCompile) return;
 
     let cancelled = false;
     const branchAtStart = branchId;
+    const atAtStart = viewingGitHash;
     (async () => {
       try {
-        const probe = await fetch(pdfUrl(id, Date.now(), branchId), { method: "GET" });
-        if (cancelled || branchAtStart !== branchId) return;
+        const probe = await fetch(pdfUrl(id, Date.now(), branchId, viewingGitHash), {
+          method: "GET",
+        });
+        if (cancelled || branchAtStart !== branchId || atAtStart !== viewingGitHash) return;
         if (probe.ok) {
           setPdfBust(Date.now());
           return;
         }
         await runCompileRef.current({ auto: true });
       } catch {
-        if (!cancelled && branchAtStart === branchId) {
+        if (!cancelled && branchAtStart === branchId && atAtStart === viewingGitHash) {
           await runCompileRef.current({ auto: true });
         }
       }
@@ -1411,7 +1416,7 @@ export function EditorPage() {
             return;
           }
           if (!anchor.file.endsWith(".tex") && !anchor.file.endsWith(".ltx")) return;
-          const hit = await synctexForward(id, anchor.file, anchor.line, col, branchId);
+          const hit = await synctexForward(id, anchor.file, anchor.line, col, branchId, viewingGitHash);
           setPdfHighlight({
             page: hit.page,
             x: hit.x,
@@ -1427,7 +1432,7 @@ export function EditorPage() {
         }
       })();
     },
-    [id, branchId],
+    [id, branchId, viewingGitHash],
   );
 
   const activateReviewHunk = useCallback(
@@ -1514,7 +1519,7 @@ export function EditorPage() {
     async (page: number, x: number, y: number) => {
       if (!id) return;
       try {
-        const hit = await synctexLookup(id, page, x, y, branchId);
+        const hit = await synctexLookup(id, page, x, y, branchId, viewingGitHash);
         const target = normalizeSynctexPath(hit.input);
         if (!target) {
           showSyncToast("Stale SyncTeX paths — hit Recompile");
@@ -1539,14 +1544,14 @@ export function EditorPage() {
         showSyncToast("No SyncTeX match — recompile?");
       }
     },
-    [id, branchId, normalizeSynctexPath, showSyncToast],
+    [id, branchId, viewingGitHash, normalizeSynctexPath, showSyncToast],
   );
 
   const onPdfComment = useCallback(
     async (page: number, x: number, y: number) => {
       if (!id) return;
       try {
-        const hit = await synctexLookup(id, page, x, y, branchId);
+        const hit = await synctexLookup(id, page, x, y, branchId, viewingGitHash);
         const target = normalizeSynctexPath(hit.input);
         if (!target) {
           showSyncToast("Stale SyncTeX paths — hit Recompile");
@@ -1569,7 +1574,7 @@ export function EditorPage() {
         showSyncToast("No SyncTeX match — recompile?");
       }
     },
-    [id, branchId, jumpToAnchor, normalizeSynctexPath, showSyncToast, closeOverlappingChrome],
+    [id, branchId, viewingGitHash, jumpToAnchor, normalizeSynctexPath, showSyncToast, closeOverlappingChrome],
   );
 
   const onRequestComment = useCallback(
@@ -1612,7 +1617,7 @@ export function EditorPage() {
       if (!id || !activePath) return;
       if (!activePath.endsWith(".tex") && !activePath.endsWith(".ltx")) return;
       try {
-        const hit = await synctexForward(id, activePath, line, column, branchId);
+        const hit = await synctexForward(id, activePath, line, column, branchId, viewingGitHash);
         setPdfHighlight({
           page: hit.page,
           x: hit.x,
@@ -1628,7 +1633,7 @@ export function EditorPage() {
         showSyncToast("No SyncTeX match — recompile?");
       }
     },
-    [id, activePath, branchId, showSyncToast],
+    [id, activePath, branchId, viewingGitHash, showSyncToast],
   );
 
   const openPath = useCallback((path: string) => {
@@ -2220,7 +2225,7 @@ export function EditorPage() {
                     <div className="toolbar-menu-sep" />
                     <a
                       role="menuitem"
-                      href={downloadUrl(id, "pdf", branchId)}
+                      href={downloadUrl(id, "pdf", branchId, viewingGitHash)}
                       download={`${id}.pdf`}
                       onClick={() => setToolbarMoreOpen(false)}
                     >
@@ -2545,7 +2550,7 @@ export function EditorPage() {
               }
               right={
                 <PdfViewer
-                  url={pdfBust != null ? pdfUrl(id, pdfBust, branchId) : null}
+                  url={pdfBust != null ? pdfUrl(id, pdfBust, branchId, viewingGitHash) : null}
                   emptyHint={
                     viewingGitHash
                       ? "Historical leaf — PDF preview is for the live tip."

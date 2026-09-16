@@ -411,17 +411,19 @@ export function renameProjectPath(
   });
 }
 
-export function pdfUrl(id: string, bust?: number, branchId?: string): string {
+export function pdfUrl(id: string, bust?: number, branchId?: string, at?: string | null): string {
   const params = new URLSearchParams();
   if (bust != null) params.set("t", String(bust));
-  if (branchId) params.set("branchId", branchId);
+  if (at) params.set("at", at);
+  else if (branchId) params.set("branchId", branchId);
   const q = params.toString() ? `?${params}` : "";
   return `/api/projects/${encodeURIComponent(id)}/pdf${q}`;
 }
 
-export function downloadUrl(id: string, format: "pdf" | "zip", branchId?: string): string {
+export function downloadUrl(id: string, format: "pdf" | "zip", branchId?: string, at?: string | null): string {
   const params = new URLSearchParams({ format });
-  if (branchId) params.set("branchId", branchId);
+  if (at) params.set("at", at);
+  else if (branchId) params.set("branchId", branchId);
   return `/api/projects/${encodeURIComponent(id)}/download?${params}`;
 }
 
@@ -431,6 +433,7 @@ export function synctexLookup(
   x: number,
   y: number,
   branchId?: string,
+  at?: string | null,
 ): Promise<SynctexHit> {
   const params = new URLSearchParams({
     direction: "reverse",
@@ -438,7 +441,8 @@ export function synctexLookup(
     x: String(x),
     y: String(y),
   });
-  if (branchId) params.set("branchId", branchId);
+  if (at) params.set("at", at);
+  else if (branchId) params.set("branchId", branchId);
   return request(`/api/projects/${encodeURIComponent(id)}/synctex?${params}`);
 }
 
@@ -448,6 +452,7 @@ export function synctexForward(
   line: number,
   column = 1,
   branchId?: string,
+  at?: string | null,
 ): Promise<SynctexForwardHit> {
   const params = new URLSearchParams({
     direction: "forward",
@@ -455,7 +460,8 @@ export function synctexForward(
     line: String(line),
     column: String(column),
   });
-  if (branchId) params.set("branchId", branchId);
+  if (at) params.set("at", at);
+  else if (branchId) params.set("branchId", branchId);
   return request(`/api/projects/${encodeURIComponent(id)}/synctex?${params}`);
 }
 
@@ -526,11 +532,12 @@ export type CompileHandlers = {
 export function compileProject(
   id: string,
   handlers: CompileHandlers = {},
-  opts?: { branchId?: string },
+  opts?: { branchId?: string; at?: string | null },
 ): Promise<CompileResult> {
   return new Promise((resolve, reject) => {
     const params = new URLSearchParams({ stream: "1" });
-    if (opts?.branchId) params.set("branchId", opts.branchId);
+    if (opts?.at) params.set("at", opts.at);
+    else if (opts?.branchId) params.set("branchId", opts.branchId);
     fetch(`/api/projects/${encodeURIComponent(id)}/compile?${params}`, {
       method: "POST",
       credentials: "include",
