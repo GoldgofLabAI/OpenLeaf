@@ -208,7 +208,12 @@ export type MergeFileSides = {
 
 export function startProjectMerge(
   id: string,
-  body: { sourceBranchId: string; targetBranchId?: string },
+  body: {
+    sourceBranchId: string;
+    targetBranchId?: string;
+    commitDirtyTarget?: boolean;
+    preMergeMessage?: string;
+  },
 ): Promise<MergeSession> {
   return request(`/api/projects/${encodeURIComponent(id)}/timeline/merge/start`, {
     method: "POST",

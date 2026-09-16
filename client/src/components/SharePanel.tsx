@@ -227,6 +227,7 @@ export function SharePanel({
   const [allowCompile, setAllowCompile] = useState(true);
   const [allowDownload, setAllowDownload] = useState(true);
   const [allowHistory, setAllowHistory] = useState(true);
+  const [riskAck, setRiskAck] = useState(false);
   const [showPassword, setShowPassword] = useState(true);
   const [adjusting, setAdjusting] = useState(false);
   const [showExtendPicker, setShowExtendPicker] = useState(false);
@@ -265,6 +266,7 @@ export function SharePanel({
     // Fresh create form: never pre-select a branch (including main).
     setBranchChoice(null);
     setCreating(false);
+    setRiskAck(false);
     void refresh().finally(() => setLoading(false));
   }, [open, projectId]); // eslint-disable-line react-hooks/exhaustive-deps -- reset only when opening
 
@@ -304,6 +306,10 @@ export function SharePanel({
   const onStart = async () => {
     if (!branchChoice) {
       setError("Pick a timeline leaf for this share link");
+      return;
+    }
+    if (!riskAck) {
+      setError("Confirm the public-link risk acknowledgment before creating a link");
       return;
     }
     setBusy(true);
@@ -465,6 +471,7 @@ export function SharePanel({
                 onClick={() => {
                   setCreating(true);
                   setBranchChoice(null);
+                  setRiskAck(false);
                 }}
               >
                 + New user link
@@ -877,6 +884,30 @@ export function SharePanel({
                 <span className="share-muted"> — guests can browse snapshots (restore stays host-only)</span>
               </span>
             </label>
+
+            <div className="share-risk" role="group" aria-labelledby="share-risk-title">
+              <p id="share-risk-title" className="share-risk-title">
+                Public link risk
+              </p>
+              <p className="share-risk-copy">
+                This opens a temporary public URL on the internet. Anyone with the invitation and credentials can reach
+                this project (and, if you allow compile, run LaTeX on <em>your</em> machine). OpenLeaf contributors are{" "}
+                <strong>not responsible</strong> for the security, privacy, or integrity of your data, nor for anything
+                guests or AI tools do with a link you create. Use only with people and tools you trust.
+              </p>
+              <label className="share-check share-risk-ack">
+                <input
+                  type="checkbox"
+                  checked={riskAck}
+                  onChange={(e) => setRiskAck(e.target.checked)}
+                  disabled={busy}
+                />
+                <span>
+                  I understand the risks and that OpenLeaf is <strong>not responsible</strong> for the security of my
+                  data or for misuse of this public link.
+                </span>
+              </label>
+            </div>
           </div>
 
           <div className="share-footer">
@@ -886,6 +917,7 @@ export function SharePanel({
               onClick={() => void onStart()}
               disabled={
                 busy ||
+                !riskAck ||
                 !branchChoice ||
                 (branchChoice.mode === "continue" &&
                   branchChoice.sacred &&

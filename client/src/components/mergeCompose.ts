@@ -4,6 +4,20 @@ export type MergeDraft = {
   intoBranchId: string | null;
 };
 
+export const DEFAULT_PRE_MERGE_MESSAGE = "pre-merge-commit";
+
+export function mergeStartAllowed(input: {
+  fromSet: boolean;
+  intoSet: boolean;
+  distinct: boolean;
+  intoDirty: boolean;
+  commitDirtyTarget: boolean;
+}): boolean {
+  if (!input.fromSet || !input.intoSet || !input.distinct) return false;
+  if (input.intoDirty && !input.commitDirtyTarget) return false;
+  return true;
+}
+
 export type MergeTipPick =
   | { ok: true; draft: MergeDraft }
   | { ok: false; error: string };

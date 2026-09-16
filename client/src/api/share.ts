@@ -30,6 +30,8 @@ export type ShareAiCollaboratorView = {
   token: string | null;
   aiUrl: string | null;
   starterPrompt?: string | null;
+  mcpUrl?: string | null;
+  mcpConfig?: string | null;
   createdAt: number;
   expiresAt: number | null;
   revoked: boolean;
@@ -191,6 +193,8 @@ export type MintAiCollaboratorResponse = {
   ai: ShareAiCollaboratorView & { token: string };
   aiUrl: string;
   starterPrompt: string;
+  mcpUrl: string;
+  mcpConfig: string;
   gateway: AiGatewayView;
   collaborators: ShareAiCollaboratorView[];
 };

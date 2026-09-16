@@ -3,6 +3,16 @@
   "private": true,
   "version": "1.0.0",
   "description": "Local-first Overleaf-like LaTeX editor",
+  "license": "MIT",
+  "author": "OpenLeaf contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neoyinzhanghan/OpenLeaf.git"
+  },
+  "bugs": {
+    "url": "https://github.com/neoyinzhanghan/OpenLeaf/issues"
+  },
+  "homepage": "https://github.com/neoyinzhanghan/OpenLeaf#readme",
   "workspaces": [
     "server",
     "client"

@@ -166,6 +166,11 @@ function localGateway(projectId: string): AiGateway {
   return g;
 }
 
+function preferLocalGateway(): boolean {
+  const v = (process.env.OPENLEAF_AI_GATEWAY || "1").trim().toLowerCase();
+  return v === "0" || v === "false" || v === "off" || v === "local";
+}
+
 /**
  * Return a public (or localhost fallback) origin for AI briefing URLs.
  * Reuses an already-running gateway. Starts cloudflared on first use when available.
@@ -175,6 +180,8 @@ export async function ensureAiGateway(projectId: string): Promise<AiGateway> {
   if (existing && (existing.status === "active" || existing.status === "starting") && existing.url) {
     return existing;
   }
+
+  if (preferLocalGateway()) return localGateway(projectId);
 
   let bin: string;
   try {

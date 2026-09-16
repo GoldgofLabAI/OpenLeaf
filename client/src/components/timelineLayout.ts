@@ -45,35 +45,56 @@ export type TimelineLayoutResult = {
 };
 
 type Scale = {
-  originY: number;
   laneGap: number;
   padLeft: number;
   padRight: number;
+  /** Same-lane consecutive leaves (minutes apart). */
   minGap: number;
   maxGap: number;
   baseGap: number;
+  /** Parent → first leaf on a new lane. */
+  forkGap: number;
+  /** Same timestamp, same lane. */
+  sameGap: number;
+  padTop: number;
 };
 
 function scaleFor(compact?: boolean): Scale {
   if (compact) {
     return {
-      originY: 118,
-      laneGap: 72,
-      padLeft: 48,
-      padRight: 110,
-      minGap: 64,
-      maxGap: 150,
-      baseGap: 52,
+      laneGap: 44,
+      padLeft: 24,
+      padRight: 64,
+      minGap: 30,
+      maxGap: 80,
+      baseGap: 26,
+      forkGap: 28,
+      sameGap: 22,
+      padTop: 40,
     };
   }
   return {
-    originY: 200,
-    laneGap: 96,
-    padLeft: 72,
-    padRight: 160,
-    minGap: 104,
-    maxGap: 220,
-    baseGap: 80,
+    laneGap: 56,
+    padLeft: 36,
+    padRight: 88,
+    minGap: 40,
+    maxGap: 112,
+    baseGap: 34,
+    forkGap: 36,
+    sameGap: 28,
+    padTop: 56,
+  };
+}
+
+export function emptyTimelineLayout(compact?: boolean): TimelineLayoutResult {
+  const s = scaleFor(compact);
+  return {
+    nodes: [],
+    edges: [],
+    width: compact ? 360 : 480,
+    height: compact ? 168 : 220,
+    originY: s.padTop,
+    padLeft: s.padLeft,
   };
 }
 
@@ -120,9 +141,27 @@ export function shortMsg(msg: string, max = 28): string {
 }
 
 function compressedGapMs(deltaMs: number, s: Scale): number {
-  const hours = Math.max(0, deltaMs) / 3_600_000;
-  const gap = s.baseGap + Math.log1p(hours * 2) * 36;
+  if (deltaMs <= 0) return s.sameGap;
+  const hours = deltaMs / 3_600_000;
+  const gap = s.baseGap + Math.log1p(hours) * 16;
   return Math.min(s.maxGap, Math.max(s.minGap, gap));
+}
+
+function tickMs(iso: string): number {
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/** Reuse a nearby column on another lane so parallel work doesn't stretch the axis. */
+function packColumn(minX: number, lane: number, placed: Array<{ x: number; lane: number }>, snap: number): number {
+  let best: number | null = null;
+  for (const p of placed) {
+    if (p.lane === lane) continue;
+    if (p.x + 0.5 < minX) continue;
+    if (p.x - minX > snap) continue;
+    if (best == null || p.x < best) best = p.x;
+  }
+  return best ?? minX;
 }
 
 type AnnoBox = { left: number; right: number; top: number; bottom: number };
@@ -137,17 +176,16 @@ function overlaps(a: AnnoBox, b: AnnoBox, pad = 6): boolean {
 }
 
 function tickBox(x: number, y: number, above: boolean, tier: number, w: number, h: number): AnnoBox {
-  const base = 12;
-  const step = 22;
+  const base = 10;
+  const step = 16;
   const mid = base + tier * step + h / 2;
   const cy = above ? y - mid : y + mid;
   return { left: x - w / 2, right: x + w / 2, top: cy - h / 2, bottom: cy + h / 2 };
 }
 
 function labelBox(x: number, y: number, above: boolean, tier: number, w: number, h: number): AnnoBox {
-  // Tight stack — tip chips are small pills, not multi-line message blocks.
-  const base = 18;
-  const step = 26;
+  const base = 14;
+  const step = 20;
   const mid = base + tier * step + h / 2;
   const cy = above ? y - mid : y + mid;
   return { left: x - w / 2, right: x + w / 2, top: cy - h / 2, bottom: cy + h / 2 };
@@ -161,15 +199,15 @@ function labelBox(x: number, y: number, above: boolean, tier: number, w: number,
  * - Full message / author / actions stay in the hover dock.
  */
 function deconflictAnnotations(nodes: TimelineLayoutNode[], compact?: boolean): number {
-  const tickW = compact ? 72 : 84;
-  const tickH = 18;
-  const tipLabelH = 16;
-  const tipLabelW = compact ? 88 : 108;
-  const whisperH = 14;
-  const whisperChars = compact ? 14 : 18;
-  const whisperW = compact ? 72 : 92;
-  const minTickDx = compact ? 88 : 108;
-  const minWhisperDx = compact ? 100 : 124;
+  const tickW = compact ? 64 : 76;
+  const tickH = 16;
+  const tipLabelH = 15;
+  const tipLabelW = compact ? 76 : 92;
+  const whisperH = 13;
+  const whisperChars = compact ? 12 : 16;
+  const whisperW = compact ? 64 : 80;
+  const minTickDx = compact ? 56 : 68;
+  const minWhisperDx = compact ? 72 : 86;
 
   for (const n of nodes) {
     const tipSideAbove = n.lane >= 0;
@@ -201,14 +239,14 @@ function deconflictAnnotations(nodes: TimelineLayoutNode[], compact?: boolean): 
       n.labelMaxChars = 0; // branch chip, not message
       placed.push(box);
       placedLabel = true;
-      maxOutward = Math.max(maxOutward, 22 + tier * 28 + tipLabelH);
+      maxOutward = Math.max(maxOutward, 16 + tier * 22 + tipLabelH);
       break;
     }
     if (!placedLabel) {
       n.showLabel = true;
       n.labelTier = 2;
       n.labelMaxChars = 0;
-      maxOutward = Math.max(maxOutward, 22 + 2 * 28 + tipLabelH);
+      maxOutward = Math.max(maxOutward, 16 + 2 * 22 + tipLabelH);
     }
   }
 
@@ -227,7 +265,7 @@ function deconflictAnnotations(nodes: TimelineLayoutNode[], compact?: boolean): 
       placed.push(box);
       lastWhisperX = n.x;
       placedWhisper = true;
-      maxOutward = Math.max(maxOutward, 18 + tier * 26 + whisperH);
+      maxOutward = Math.max(maxOutward, 14 + tier * 20 + whisperH);
       break;
     }
     void placedWhisper;
@@ -251,7 +289,7 @@ function deconflictAnnotations(nodes: TimelineLayoutNode[], compact?: boolean): 
       placed.push(box);
       lastTickX = n.x;
       placedTick = true;
-      maxOutward = Math.max(maxOutward, 10 + tier * 18 + tickH);
+      maxOutward = Math.max(maxOutward, 8 + tier * 14 + tickH);
       break;
     }
     if (!placedTick) {
@@ -259,7 +297,7 @@ function deconflictAnnotations(nodes: TimelineLayoutNode[], compact?: boolean): 
       if (force) {
         n.showTickTime = true;
         n.tickTier = 1;
-        maxOutward = Math.max(maxOutward, 10 + 18 + tickH);
+        maxOutward = Math.max(maxOutward, 8 + 14 + tickH);
       }
     }
   }
@@ -350,31 +388,39 @@ export function layoutTimeline(
       taken.add(lane);
     });
 
-  const yOf = (branchId: string) => s.originY + (laneOf.get(branchId) ?? 0) * s.laneGap;
+  const yOf = (branchId: string) => (laneOf.get(branchId) ?? 0) * s.laneGap;
 
   const chrono = [...view.nodes].sort(
     (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
   );
   const xOf = new Map<string, number>();
-  let cursorX = s.padLeft;
-  let prevMs: number | null = null;
+  const lastOnLane = new Map<number, { id: string; x: number; createdAt: string }>();
+  const placedCols: Array<{ x: number; lane: number }> = [];
+  const colSnap = s.minGap * 0.65;
+
   for (const node of chrono) {
-    const ms = Date.parse(node.createdAt);
-    if (prevMs != null && Number.isFinite(ms)) {
-      const delta = Math.max(0, ms - prevMs);
-      cursorX += delta === 0 ? s.minGap * 0.6 : compressedGapMs(delta, s);
+    const lane = laneOf.get(node.branchId) ?? 0;
+    let minX = s.padLeft;
+    const parent = node.parentId ? nodeById.get(node.parentId) : undefined;
+    const parentX = parent ? xOf.get(parent.id) : undefined;
+    if (parent && parentX != null) {
+      const fork = parent.branchId !== node.branchId;
+      const dt = tickMs(node.createdAt) - tickMs(parent.createdAt);
+      minX = Math.max(minX, parentX + (fork ? s.forkGap : compressedGapMs(dt, s)));
     }
-    // Fork tips sit clearly to the right of the parent so the branch can drop
-    // perpendicularly onto its lane, then run forward — same for AI and human.
-    if (node.parentId) {
-      const parent = nodeById.get(node.parentId);
-      if (parent && parent.branchId !== node.branchId) {
-        const px = xOf.get(parent.id);
-        if (px != null) cursorX = Math.max(cursorX, px + s.minGap * 0.7);
-      }
+    if (node.mergeParentId) {
+      const mx = xOf.get(node.mergeParentId);
+      if (mx != null) minX = Math.max(minX, mx + s.forkGap);
     }
-    xOf.set(node.id, cursorX);
-    if (Number.isFinite(ms)) prevMs = ms;
+    const prevLane = lastOnLane.get(lane);
+    if (prevLane) {
+      const dt = tickMs(node.createdAt) - tickMs(prevLane.createdAt);
+      minX = Math.max(minX, prevLane.x + compressedGapMs(dt, s));
+    }
+    const x = packColumn(minX, lane, placedCols, colSnap);
+    xOf.set(node.id, x);
+    lastOnLane.set(lane, { id: node.id, x, createdAt: node.createdAt });
+    placedCols.push({ x, lane });
   }
 
   const nodes: TimelineLayoutNode[] = [];
@@ -406,6 +452,14 @@ export function layoutTimeline(
   }
 
   const maxAnno = deconflictAnnotations(nodes, opts?.compact);
+  const minY = nodes.reduce((m, n) => Math.min(m, n.y), 0);
+  const maxY = nodes.reduce((m, n) => Math.max(m, n.y), 0);
+  const padY = Math.max(s.padTop, maxAnno + 12);
+  const shiftY = padY - minY;
+  if (shiftY !== 0) {
+    for (const n of nodes) n.y += shiftY;
+  }
+  const originY = shiftY;
 
   const edges: TimelineLayoutEdge[] = [];
   for (const l of nodes) {
@@ -446,14 +500,12 @@ export function layoutTimeline(
   }
 
   const maxX = nodes.reduce((m, n) => Math.max(m, n.x), s.padLeft);
-  const maxLane = nodes.reduce((m, n) => Math.max(m, Math.abs(n.lane)), 0);
-  const padY = Math.max(opts?.compact ? 100 : 140, maxAnno + 24);
   return {
     nodes,
     edges,
     width: maxX + s.padRight,
-    height: s.originY + maxLane * s.laneGap + padY,
-    originY: s.originY,
+    height: maxY + shiftY + padY,
+    originY,
     padLeft: s.padLeft,
   };
 }
@@ -512,7 +564,7 @@ export function mergePreviewGeometry(
   const source = nodes.find((n) => n.node.id === sourceNodeId);
   const target = nodes.find((n) => n.node.id === targetNodeId);
   if (!source || !target || source.node.id === target.node.id) return null;
-  const gap = compact ? 72 : 108;
+  const gap = compact ? 44 : 52;
   const ghostX = target.x + gap;
   const ghostY = target.y;
   return {

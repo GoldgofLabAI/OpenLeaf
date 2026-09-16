@@ -9,6 +9,7 @@ import {
   ensureBranchRoot,
   getBranch,
   getTimelineView,
+  intentionalCommit,
   isBranchPruned,
   loadTimeline,
   type TimelineView,
@@ -221,13 +222,22 @@ async function readStageBlob(
   return { text: raw.toString("utf8"), binary: false, missing: false };
 }
 
+export const DEFAULT_PRE_MERGE_MESSAGE = "pre-merge-commit";
+
 /**
  * Start merging source branch tip into target branch tip (host must be on target tip).
  * Leaves the target worktree in a conflicted or staged merge state until complete/abort.
  */
 export async function startBranchMerge(
   projectId: string,
-  opts: { sourceBranchId: string; targetBranchId?: string; author?: GitAuthor },
+  opts: {
+    sourceBranchId: string;
+    targetBranchId?: string;
+    author?: GitAuthor;
+    /** Snapshot uncommitted target edits as a timeline leaf before merging. */
+    commitDirtyTarget?: boolean;
+    preMergeMessage?: string;
+  },
 ): Promise<MergeSession> {
   if (!isGitEnabled()) throw err(400, "Git is disabled");
   await ensureProjectGit(projectId);
@@ -254,18 +264,27 @@ export async function startBranchMerge(
     throw err(400, "Check out the target branch tip before merging into it");
   }
 
-  const sourceHead = state.nodes.find((n) => n.id === source.headNodeId);
-  const targetHead = state.nodes.find((n) => n.id === target.headNodeId);
-  if (!sourceHead || !targetHead) throw err(500, "Missing branch tip nodes");
-
   const root = await ensureBranchRoot(projectId, target.id);
   await ensureBranchRoot(projectId, source.id);
 
-  // Refuse dirty target WC (uncommitted human edits).
+  // Uncommitted edits on the landing tip would be mixed into the merge. Snapshot
+  // them first when the host asked us to; otherwise refuse.
   const dirty = await runGit(projectId, ["status", "--porcelain"], { cwd: root, allowFailure: true });
+  let stateAfter = state;
   if (dirty.stdout.trim()) {
-    throw err(400, "Target working copy has uncommitted changes — commit or discard them first");
+    if (!opts.commitDirtyTarget) {
+      throw err(400, "Target working copy has uncommitted changes — commit or discard them first");
+    }
+    const message = (opts.preMergeMessage ?? DEFAULT_PRE_MERGE_MESSAGE).trim() || DEFAULT_PRE_MERGE_MESSAGE;
+    await intentionalCommit(projectId, { branchId: target.id, message, author: opts.author });
+    stateAfter = await loadTimeline(projectId);
   }
+
+  const sourceNow = getBranch(stateAfter, source.id);
+  const targetNow = getBranch(stateAfter, target.id);
+  const sourceHead = stateAfter.nodes.find((n) => n.id === sourceNow.headNodeId);
+  const targetHead = stateAfter.nodes.find((n) => n.id === targetNow.headNodeId);
+  if (!sourceHead || !targetHead) throw err(500, "Missing branch tip nodes");
 
   // Abort leftover merge state if any.
   if (await hasMergeHead(projectId, root)) {

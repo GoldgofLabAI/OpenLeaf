@@ -4,7 +4,7 @@ import { compileProject } from "./compiler.js";
 import { listWorkingTreeChanges } from "./projectGit.js";
 import { deletePath, getTree, MAX_TEXT_FILE_BYTES, readFile, writeFile, resolveRootPath, type TreeNode } from "./projectFs.js";
 import { type ShareError } from "./share.js";
-import { buildStarterPrompt } from "./aiPrompt.js";
+import { buildMcpConfigJson, buildStarterPrompt, mcpUrlFromApiBase } from "./aiPrompt.js";
 import {
   ensureAiGateway,
   gatewayPublicView,
@@ -279,6 +279,8 @@ export async function mintAiCollaborator(
   ai: AiCollaborator;
   aiUrl: string;
   starterPrompt: string;
+  mcpUrl: string;
+  mcpConfig: string;
   gateway: ReturnType<typeof gatewayPublicView>;
 }> {
   const slug = sanitizeSlug(input.slug);
@@ -342,10 +344,14 @@ export async function mintAiCollaborator(
   logAi(ai, `minted sandbox from ${parent.name}@${tipNode.gitHash.slice(0, 7)}`);
 
   const aiUrl = `${origin}/ai/${ai.token}`;
+  const apiBase = `${origin}/api/ai/v1`;
+  const mcpUrl = mcpUrlFromApiBase(apiBase);
   return {
     ai,
     aiUrl,
-    starterPrompt: buildStarterPrompt(aiUrl, ai, `${origin}/api/ai/v1`),
+    starterPrompt: buildStarterPrompt(aiUrl, ai, apiBase),
+    mcpUrl,
+    mcpConfig: buildMcpConfigJson({ mcpUrl, token: ai.token, slug: ai.slug }),
     gateway: gatewayPublicView(gateway),
   };
 }
@@ -365,12 +371,17 @@ export function hostAiView(ai: AiCollaborator) {
   const dead = isAiLinkDead(ai);
   const origin = publicUrlFor(ai.projectId);
   const aiUrl = dead || !origin ? null : `${origin}/ai/${ai.token}`;
+  const apiBase = origin ? `${origin}/api/ai/v1` : "";
+  const mcpUrl = dead || !origin ? null : mcpUrlFromApiBase(apiBase);
   return {
     ...aiPublicView(ai),
     mintedBy: ai.mintedBy,
     token: dead ? null : ai.token,
     aiUrl,
-    starterPrompt: aiUrl == null || dead ? null : buildStarterPrompt(aiUrl, ai, `${origin}/api/ai/v1`),
+    starterPrompt: aiUrl == null || dead ? null : buildStarterPrompt(aiUrl, ai, apiBase),
+    mcpUrl,
+    mcpConfig:
+      mcpUrl && !dead ? buildMcpConfigJson({ mcpUrl, token: ai.token, slug: ai.slug }) : null,
   };
 }
 
@@ -408,6 +419,8 @@ export function buildBrief(auth: AiAuth): Record<string, unknown> {
       note: "The token is the path segment of /ai/<token>. API calls use Authorization: Bearer. Never print the token.",
     },
     apiBase: api,
+    mcpUrl: mcpUrlFromApiBase(api),
+    mcp: "Streamable HTTP JSON-RPC (initialize, tools/list, tools/call). Same Bearer token.",
     openapi: `${base}/api/ai/openapi.json`,
     tools: [
       "GET /context",

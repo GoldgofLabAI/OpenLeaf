@@ -713,6 +713,8 @@ projectsRouter.post("/:id/timeline/merge/start", async (req, res) => {
   const schema = z.object({
     sourceBranchId: z.string().min(1),
     targetBranchId: z.string().optional(),
+    commitDirtyTarget: z.boolean().optional(),
+    preMergeMessage: z.string().max(200).optional(),
   });
   try {
     if (req.access?.mode === "guest") {
@@ -735,6 +737,8 @@ projectsRouter.post("/:id/timeline/merge/start", async (req, res) => {
       sourceBranchId: body.sourceBranchId,
       targetBranchId,
       author: await authorFromRequest(req.params.id, req),
+      commitDirtyTarget: body.commitDirtyTarget,
+      preMergeMessage: body.preMergeMessage,
     });
     // Disk now has merge state / conflict markers — refresh live collab from disk.
     await clearCollabSnapshot(req.params.id, targetBranchId);

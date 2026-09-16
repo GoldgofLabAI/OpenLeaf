@@ -38,6 +38,7 @@ import {
   rejectAiFile,
   rejectAiHunk,
 } from "../services/aiReview.js";
+import { handleMcpHttp } from "../services/aiMcp.js";
 import { CommentAnchorSchema } from "../services/comments.js";
 import { hostOnly } from "../services/shareAuth.js";
 
@@ -97,11 +98,13 @@ aiBriefRouter.get("/:token", (req, res) => {
   }
 
   const { ai } = auth;
+  const apiBase = `${auth.publicUrl}/api/ai/v1`;
   const prompt = buildStarterPrompt(
     `${auth.publicUrl}/ai/${ai.token}`,
     ai,
-    `${auth.publicUrl}/api/ai/v1`,
+    apiBase,
   );
+  const mcpUrl = `${apiBase}/mcp`;
   res.type("html").send(`<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>OpenLeaf AI · ${escapeHtml(ai.branchName)}</title>
@@ -141,6 +144,11 @@ aiBriefRouter.get("/:token", (req, res) => {
     <p><a href="${escapeHtml(String(brief.openapi))}">OpenAPI stub</a></p>
   </div>
   <div class="card">
+    <div class="k">MCP</div>
+    <div class="v">${escapeHtml(mcpUrl)}</div>
+    <p class="warn">Same Bearer token. Streamable HTTP JSON-RPC: <code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>. Copy the MCP config from the host’s <strong>AI links</strong> drawer (Cursor / Claude Desktop).</p>
+  </div>
+  <div class="card">
     <div class="k">Tools</div>
     <ul>${(brief.tools as string[]).map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("")}</ul>
   </div>
@@ -162,10 +170,14 @@ aiApiRouter.get("/openapi.json", (_req, res) => {
       title: "OpenLeaf AI collaborator",
       version: "1.0.0",
       description:
-        "Sandbox-only tools for an AI fork. Parent tip is read-only. Auth: Bearer token from the /ai/<token> briefing URL.",
+        "Sandbox-only tools for an AI fork. Parent tip is read-only. Auth: Bearer token from the /ai/<token> briefing URL. MCP Streamable HTTP lives at POST /mcp.",
     },
     servers: [{ url: "/api/ai/v1" }],
     paths: {
+      "/mcp": {
+        post: { summary: "MCP Streamable HTTP (JSON-RPC initialize, tools/list, tools/call)" },
+        delete: { summary: "End an MCP session (Mcp-Session-Id)" },
+      },
       "/context": { get: { summary: "Parent + sandbox tip hashes, dirty flag, file list" } },
       "/files": { get: { summary: "List files in the AI sandbox worktree" } },
       "/files/{path}": {
@@ -193,6 +205,93 @@ aiApiRouter.get("/openapi.json", (_req, res) => {
     },
     security: [{ bearerAuth: [] }],
   });
+});
+
+function mcpSessionId(req: Request): string | undefined {
+  const raw = req.headers["mcp-session-id"];
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  return undefined;
+}
+
+function sendMcp(
+  res: Response,
+  result: Awaited<ReturnType<typeof handleMcpHttp>>,
+): void {
+  for (const [key, value] of Object.entries(result.headers)) {
+    res.setHeader(key, value);
+  }
+  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, MCP-Protocol-Version");
+  if (result.status === 204 || result.body == null) {
+    res.status(result.status).end();
+    return;
+  }
+  if (typeof result.body === "string") {
+    res.status(result.status).send(result.body);
+    return;
+  }
+  res.status(result.status).json(result.body);
+}
+
+aiApiRouter.options("/v1/mcp", (_req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Authorization, Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID",
+  );
+  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, MCP-Protocol-Version");
+  res.status(204).end();
+});
+
+aiApiRouter.post("/v1/mcp", async (req, res) => {
+  const auth = requireAi(req, res);
+  if (!auth) return;
+  try {
+    sendMcp(
+      res,
+      await handleMcpHttp({
+        method: "POST",
+        auth,
+        body: req.body,
+        sessionId: mcpSessionId(req),
+        origin: typeof req.headers.origin === "string" ? req.headers.origin : undefined,
+        accept: typeof req.headers.accept === "string" ? req.headers.accept : undefined,
+      }),
+    );
+  } catch (err) {
+    res.status(statusOf(err)).json({ error: err instanceof Error ? err.message : "Failed" });
+  }
+});
+
+aiApiRouter.get("/v1/mcp", async (req, res) => {
+  const auth = requireAi(req, res);
+  if (!auth) return;
+  sendMcp(
+    res,
+    await handleMcpHttp({
+      method: "GET",
+      auth,
+      body: null,
+      sessionId: mcpSessionId(req),
+      origin: typeof req.headers.origin === "string" ? req.headers.origin : undefined,
+      accept: typeof req.headers.accept === "string" ? req.headers.accept : undefined,
+    }),
+  );
+});
+
+aiApiRouter.delete("/v1/mcp", async (req, res) => {
+  const auth = requireAi(req, res);
+  if (!auth) return;
+  sendMcp(
+    res,
+    await handleMcpHttp({
+      method: "DELETE",
+      auth,
+      body: null,
+      sessionId: mcpSessionId(req),
+      origin: typeof req.headers.origin === "string" ? req.headers.origin : undefined,
+    }),
+  );
 });
 
 aiApiRouter.get("/v1/context", async (req, res) => {
@@ -551,6 +650,8 @@ projectAiRouter.post("/", async (req, res) => {
       ai: { ...aiPublicView(result.ai), token: result.ai.token, mintedBy: result.ai.mintedBy },
       aiUrl: result.aiUrl,
       starterPrompt: result.starterPrompt,
+      mcpUrl: result.mcpUrl,
+      mcpConfig: result.mcpConfig,
       gateway: result.gateway,
       collaborators: list.collaborators,
     });

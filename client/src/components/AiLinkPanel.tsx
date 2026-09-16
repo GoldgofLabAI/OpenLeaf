@@ -94,8 +94,10 @@ export function AiLinkPanel({
   const [slug, setSlug] = useState("chatgpt-pass1");
   const [ttlMinutes, setTtlMinutes] = useState<number | "">("");
   const [lastPrompt, setLastPrompt] = useState<string | null>(null);
+  const [lastMcpConfig, setLastMcpConfig] = useState<string | null>(null);
   const [lastUrl, setLastUrl] = useState<string | null>(null);
   const [lastId, setLastId] = useState<string | null>(null);
+  const [riskAck, setRiskAck] = useState(false);
 
   const onCountChangeRef = useRef(onCountChange);
   onCountChangeRef.current = onCountChange;
@@ -118,6 +120,7 @@ export function AiLinkPanel({
     if (!open) return;
     setLoading(true);
     setError(null);
+    setRiskAck(false);
     void refresh()
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load AI links"))
       .finally(() => setLoading(false));
@@ -146,6 +149,10 @@ export function AiLinkPanel({
       setError("Pick a short slug for the AI sandbox (e.g. chatgpt-pass1)");
       return;
     }
+    if (!riskAck) {
+      setError("Confirm the public AI-link risk acknowledgment before minting");
+      return;
+    }
     if (!canMint) {
       setError(
         parentIsAi
@@ -164,6 +171,7 @@ export function AiLinkPanel({
       });
       applyList({ gateway: r.gateway, collaborators: r.collaborators });
       setLastPrompt(r.starterPrompt);
+      setLastMcpConfig(r.mcpConfig);
       setLastUrl(r.aiUrl);
       setLastId(r.ai.id);
       try {
@@ -187,6 +195,7 @@ export function AiLinkPanel({
       applyList(r);
       if (lastId === aiId) {
         setLastPrompt(null);
+        setLastMcpConfig(null);
         setLastUrl(null);
         setLastId(null);
       }
@@ -224,7 +233,8 @@ export function AiLinkPanel({
           <p className="history-hint">
             Independent of user share links. Each AI collaborator gets its own <code>ai/…</code> sandbox forked from
             the <strong>committed tip</strong> of a human leaf you can edit. You can mint several AIs on the same leaf;
-            they never write the parent tip. Ending a user share does not revoke AI tokens.
+            they never write the parent tip. Ending a user share does not revoke AI tokens. Cursor / Claude Desktop can
+            attach via <strong>Copy MCP config</strong> (same token as the ChatGPT prompt).
           </p>
 
           <div className="share-section-title">
@@ -276,10 +286,42 @@ export function AiLinkPanel({
                   disabled={busy || !canMint}
                   style={{ maxWidth: "7.5rem" }}
                 />
-                <button type="button" className="btn btn-primary" disabled={busy || !canMint} onClick={() => void onMint()}>
-                  {busy ? "Forking…" : "Mint AI link"}
-                </button>
               </div>
+            </div>
+
+            <div className="share-risk" role="group" aria-labelledby="ai-risk-title">
+              <p id="ai-risk-title" className="share-risk-title">
+                Public AI link risk
+              </p>
+              <p className="share-risk-copy">
+                Minting publishes a bearer token (and usually a public tunnel URL) that can read and edit the AI sandbox
+                you create. Treat that token like a password. OpenLeaf contributors are <strong>not responsible</strong>{" "}
+                for the security or privacy of your manuscript, nor for what an external model or anyone with the token
+                does. Only mint for tools and people you trust.
+              </p>
+              <label className="share-check share-risk-ack">
+                <input
+                  type="checkbox"
+                  checked={riskAck}
+                  onChange={(e) => setRiskAck(e.target.checked)}
+                  disabled={busy || !canMint}
+                />
+                <span>
+                  I understand the risks and that OpenLeaf is <strong>not responsible</strong> for the security of my
+                  data or for misuse of this AI link.
+                </span>
+              </label>
+            </div>
+
+            <div className="share-footer">
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy || !canMint || !riskAck}
+                onClick={() => void onMint()}
+              >
+                {busy ? "Forking…" : "Mint AI link"}
+              </button>
             </div>
           </div>
 
@@ -298,7 +340,16 @@ export function AiLinkPanel({
                   Copy ChatGPT prompt
                 </CopyButton>
               </div>
+              {lastMcpConfig && (
+                <div className="share-cred">
+                  <span className="share-cred-label">MCP</span>
+                  <CopyButton value={lastMcpConfig} label="MCP config">
+                    Copy MCP config
+                  </CopyButton>
+                </div>
+              )}
               <pre className="share-ai-prompt">{lastPrompt}</pre>
+              {lastMcpConfig && <pre className="share-ai-prompt">{lastMcpConfig}</pre>}
             </div>
           )}
 
@@ -386,6 +437,11 @@ function AiList({
               {a.starterPrompt && (
                 <CopyButton value={a.starterPrompt} label="ChatGPT prompt">
                   Copy ChatGPT prompt
+                </CopyButton>
+              )}
+              {a.mcpConfig && (
+                <CopyButton value={a.mcpConfig} label="MCP config">
+                  Copy MCP config
                 </CopyButton>
               )}
               {canReview && onOpenReview && (

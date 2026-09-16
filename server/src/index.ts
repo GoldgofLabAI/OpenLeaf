@@ -36,7 +36,11 @@ async function main() {
   const app = express();
   const cfg = getPublicConfig();
 
-  app.use(cors());
+  app.use(
+    cors({
+      exposedHeaders: ["Mcp-Session-Id", "MCP-Protocol-Version"],
+    }),
+  );
   app.use(express.json({ limit: "20mb" }));
   app.use(invalidJsonMiddleware);
   // Classifies every request as host (direct) or guest (via a share tunnel)

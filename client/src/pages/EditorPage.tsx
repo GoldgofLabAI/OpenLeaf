@@ -2306,8 +2306,8 @@ export function EditorPage() {
               : "Merge started — no conflicts, ready to complete",
           );
         }}
-        onBeforeMerge={async () => {
-          await flushCollab(id, { identityId: collab.identity?.id, branchId });
+        onBeforeMerge={async (flushBranchId) => {
+          await flushCollab(id, { identityId: collab.identity?.id, branchId: flushBranchId ?? branchId });
         }}
         onTimelineChange={(view) => {
           // Keep timeline open so hosts can click through leaves without reopening it.

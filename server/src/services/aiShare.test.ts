@@ -77,6 +77,7 @@ describe("aiShare path guards", () => {
     assert.match(p, /POST \/edit/);
     assert.match(p, /apply_diff/);
     assert.match(p, /from=&to=/);
+    assert.match(p, /\/mcp/);
   });
 });
 

@@ -197,4 +197,67 @@ describe("branchMerge", () => {
     assert.equal(done.session.status, "completed");
     assert.equal(fs.existsSync(path.join(projectsRoot, id, "main.tex")), false);
   });
+
+  it("refuses a dirty landing tip unless commitDirtyTarget is set", async () => {
+    const id = "merge-dirty-block";
+    await seedProject(id);
+    const tl = await loadTimeline(id);
+    const mainHead = tl.branches.find((b) => b.id === "main")!.headNodeId!;
+    const forked = await forkBranch(id, { fromNodeId: mainHead, name: "dirty-block-feat" });
+    const featureId = forked.branch.id;
+
+    await checkoutTimeline(id, { branchId: featureId, nodeId: null });
+    const featureRoot = path.join(projectsRoot, id, ".openleaf", "worktrees", featureId);
+    fs.writeFileSync(path.join(featureRoot, "extra.tex"), "only on feature\n", "utf8");
+    await intentionalCommit(id, { branchId: featureId, message: "add extra" });
+
+    await checkoutTimeline(id, { branchId: "main", nodeId: null });
+    fs.writeFileSync(path.join(projectsRoot, id, "main.tex"), "dirty on main\n", "utf8");
+
+    await assert.rejects(
+      () => startBranchMerge(id, { sourceBranchId: featureId, targetBranchId: "main" }),
+      /uncommitted changes/i,
+    );
+    assert.equal(await getBranchMerge(id), null);
+    assert.match(fs.readFileSync(path.join(projectsRoot, id, "main.tex"), "utf8"), /dirty on main/);
+  });
+
+  it("commits a dirty landing tip then merges when asked", async () => {
+    const id = "merge-dirty-commit";
+    await seedProject(id);
+    const tl = await loadTimeline(id);
+    const mainHead = tl.branches.find((b) => b.id === "main")!.headNodeId!;
+    const forked = await forkBranch(id, { fromNodeId: mainHead, name: "dirty-commit-feat" });
+    const featureId = forked.branch.id;
+
+    await checkoutTimeline(id, { branchId: featureId, nodeId: null });
+    const featureRoot = path.join(projectsRoot, id, ".openleaf", "worktrees", featureId);
+    fs.writeFileSync(path.join(featureRoot, "extra.tex"), "only on feature\n", "utf8");
+    await intentionalCommit(id, { branchId: featureId, message: "add extra" });
+
+    await checkoutTimeline(id, { branchId: "main", nodeId: null });
+    fs.writeFileSync(path.join(projectsRoot, id, "main.tex"), "dirty on main\n", "utf8");
+
+    const session = await startBranchMerge(id, {
+      sourceBranchId: featureId,
+      targetBranchId: "main",
+      commitDirtyTarget: true,
+    });
+    assert.equal(session.status, "ready");
+    assert.equal(session.conflicts.length, 0);
+
+    const afterCommit = await loadTimeline(id);
+    const pre = afterCommit.nodes.find((n) => n.message === "pre-merge-commit");
+    assert.ok(pre, "should snapshot dirty landing-tip edits first");
+    assert.equal(session.targetHash, pre!.gitHash);
+    assert.match(fs.readFileSync(path.join(projectsRoot, id, "main.tex"), "utf8"), /dirty on main/);
+    assert.ok(fs.existsSync(path.join(projectsRoot, id, "extra.tex")));
+
+    const done = await completeBranchMerge(id);
+    assert.equal(done.session.status, "completed");
+    const after = await loadTimeline(id);
+    const mergeNode = after.nodes.find((n) => n.id === done.nodeId);
+    assert.ok(mergeNode);
+    assert.equal(mergeNode!.parentId, pre!.id);
+  });
 });

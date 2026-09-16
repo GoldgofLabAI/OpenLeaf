@@ -2,17 +2,18 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
-  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import type { BranchLeafStat } from "../api/client";
 import type { TimelineBranch, TimelineNode, TimelineView } from "../api/types";
 import {
   aiBranchLabel,
+  emptyTimelineLayout,
   formatTickTime,
   layoutTimeline,
   mergePreviewGeometry,
@@ -20,6 +21,22 @@ import {
   threadPathInset,
   type TimelineLayoutNode,
 } from "./timelineLayout";
+import {
+  pastPanSlop,
+  pinchCamera,
+  timelineLabelFlags,
+  timelineLabelLod,
+  TIMELINE_ZOOM_STEP,
+  wheelZoomFactor,
+  worldTransform,
+  zoomCameraAt,
+  type TimelineCamera,
+  type TimelineLabelLod,
+} from "./timelinePan";
+
+type SafariGestureEvent = Event & { scale: number; clientX: number; clientY: number };
+
+const DEFAULT_CAM: TimelineCamera = { x: 36, y: 24, k: 1 };
 
 type Props = {
   view: TimelineView | null;
@@ -71,24 +88,27 @@ export function TimelineGraph({
 
   const surfaceRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
-  const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
-  const panRef = useRef({ x: 36, y: 24 });
+  const drag = useRef<{
+    id: number;
+    x: number;
+    y: number;
+    px: number;
+    py: number;
+    moved: boolean;
+  } | null>(null);
+  const camRef = useRef<TimelineCamera>({ ...DEFAULT_CAM });
+  const pendingCam = useRef<TimelineCamera | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
   const hoverClearRef = useRef<number | null>(null);
-  const [pan, setPan] = useState({ x: 36, y: 24 });
-  panRef.current = pan;
+  const lodRef = useRef<TimelineLabelLod>("full");
+  const [lod, setLod] = useState<TimelineLabelLod>("full");
 
   const layout = useMemo(
     () =>
       view
         ? layoutTimeline(view, { compact })
-        : {
-            nodes: [] as TimelineLayoutNode[],
-            edges: [],
-            width: compact ? 480 : 640,
-            height: compact ? 260 : 400,
-            originY: compact ? 118 : 200,
-            padLeft: compact ? 48 : 72,
-          },
+        : emptyTimelineLayout(compact),
     [view, compact],
   );
 
@@ -100,7 +120,7 @@ export function TimelineGraph({
     [layout.nodes, mergeFromId, mergeIntoId, compact],
   );
 
-  const worldW = Math.max(layout.width, preview ? preview.ghostX + (compact ? 96 : 140) : 0);
+  const worldW = Math.max(layout.width, preview ? preview.ghostX + (compact ? 64 : 88) : 0);
   const worldH = layout.height;
 
   const recenter = useCallback(() => {
@@ -112,7 +132,7 @@ export function TimelineGraph({
       const xs = layout.nodes.map((n) => n.x);
       const minX = Math.min(...xs);
       const maxX = Math.max(...xs);
-      const pad = compact ? 28 : 48;
+      const pad = compact ? 20 : 32;
       const span = maxX - minX;
       // Prefer showing the whole chain when it fits; otherwise pin the tip in view
       // without shoving older leaves unnecessarily far off-screen.
@@ -128,12 +148,14 @@ export function TimelineGraph({
         if (leftEdge > pad) x = pad - minX;
       }
     }
-    const next = { x, y };
-    panRef.current = next;
+    const next: TimelineCamera = { x, y, k: 1 };
+    camRef.current = next;
+    pendingCam.current = next;
+    lodRef.current = "full";
+    setLod("full");
     if (worldRef.current) {
-      worldRef.current.style.transform = `translate(${next.x}px, ${next.y}px)`;
+      worldRef.current.style.transform = worldTransform(next);
     }
-    setPan(next);
   }, [layout, selectedId, compact]);
 
   useEffect(() => {
@@ -146,6 +168,12 @@ export function TimelineGraph({
       if (hoverClearRef.current != null) window.clearTimeout(hoverClearRef.current);
     };
   }, []);
+
+  useLayoutEffect(() => {
+    if (worldRef.current) {
+      worldRef.current.style.transform = worldTransform(camRef.current);
+    }
+  });
 
   const keepHover = useCallback(
     (id: string) => {
@@ -176,45 +204,278 @@ export function TimelineGraph({
     }, 400);
   }, [onHoverIdChange]);
 
-  const applyPan = (next: { x: number; y: number }) => {
-    panRef.current = next;
-    if (worldRef.current) {
-      worldRef.current.style.transform = `translate(${next.x}px, ${next.y}px)`;
+  const applyCamera = (next: TimelineCamera) => {
+    camRef.current = next;
+    pendingCam.current = next;
+    const nextLod = timelineLabelLod(next.k);
+    if (nextLod !== lodRef.current) {
+      lodRef.current = nextLod;
+      setLod(nextLod);
     }
-  };
-
-  const onPointerDown = (e: ReactPointerEvent) => {
-    if ((e.target as HTMLElement).closest(".tl-orb, .tl-hover-dock, .share-pick-prompt")) return;
-    drag.current = { x: e.clientX, y: e.clientY, px: panRef.current.x, py: panRef.current.y };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  };
-  const onPointerMove = (e: ReactPointerEvent) => {
-    if (!drag.current) return;
-    applyPan({
-      x: drag.current.px + (e.clientX - drag.current.x),
-      y: drag.current.py + (e.clientY - drag.current.y),
+    if (rafRef.current != null) return;
+    rafRef.current = window.requestAnimationFrame(() => {
+      rafRef.current = null;
+      const queued = pendingCam.current ?? camRef.current;
+      if (worldRef.current) {
+        worldRef.current.style.transform = worldTransform(queued);
+      }
     });
   };
-  const onPointerUp = () => {
-    if (!drag.current) return;
-    drag.current = null;
-    setPan(panRef.current);
+
+  const zoomBy = (factor: number, origin?: { x: number; y: number }) => {
+    const el = surfaceRef.current;
+    const px = origin?.x ?? (el ? el.clientWidth / 2 : 0);
+    const py = origin?.y ?? (el ? el.clientHeight / 2 : 0);
+    applyCamera(zoomCameraAt(camRef.current, px, py, factor));
   };
+
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface) return;
+
+    const pointers = new Map<number, { id: number; cx: number; cy: number }>();
+    const pinch = {
+      active: false,
+      dist0: 1,
+      midX: 0,
+      midY: 0,
+      cam: { ...DEFAULT_CAM },
+    };
+    const gesture = { active: false, x: 0, y: 0, cam: { ...DEFAULT_CAM } };
+    let listening = false;
+
+    const ignoreTarget = (target: EventTarget | null) =>
+      target instanceof Element &&
+      Boolean(
+        target.closest(".tl-hover-dock, .share-pick-prompt, .tl-fork-modal, .tl-zoom-ctrl, input, textarea"),
+      );
+
+    const surfacePoint = (clientX: number, clientY: number) => {
+      const r = surface.getBoundingClientRect();
+      return { x: clientX - r.left, y: clientY - r.top };
+    };
+
+    const pairMetrics = () => {
+      const pts = [...pointers.values()];
+      if (pts.length < 2) return null;
+      const a = pts[0];
+      const b = pts[1];
+      const dist = Math.hypot(b.cx - a.cx, b.cy - a.cy) || 1;
+      const mid = surfacePoint((a.cx + b.cx) / 2, (a.cy + b.cy) / 2);
+      return { dist, mid };
+    };
+
+    const beginPinch = () => {
+      const m = pairMetrics();
+      if (!m) return;
+      pinch.active = true;
+      pinch.dist0 = m.dist;
+      pinch.midX = m.mid.x;
+      pinch.midY = m.mid.y;
+      pinch.cam = { ...camRef.current };
+      drag.current = null;
+      suppressClickRef.current = true;
+      surface.classList.add("is-panning", "is-zooming");
+    };
+
+    const applyPinch = () => {
+      const m = pairMetrics();
+      if (!m || !pinch.active) return;
+      applyCamera(
+        pinchCamera(pinch.cam, pinch.dist0, pinch.midX, pinch.midY, m.dist, m.mid.x, m.mid.y),
+      );
+    };
+
+    const endPinch = () => {
+      pinch.active = false;
+      surface.classList.remove("is-zooming");
+    };
+
+    const releasePointer = (id: number) => {
+      if (surface.hasPointerCapture(id)) {
+        try {
+          surface.releasePointerCapture(id);
+        } catch {
+          /* already released */
+        }
+      }
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      const tracked = pointers.get(e.pointerId);
+      if (tracked) {
+        tracked.cx = e.clientX;
+        tracked.cy = e.clientY;
+      }
+      if (pinch.active && pointers.size >= 2) {
+        e.preventDefault();
+        applyPinch();
+        return;
+      }
+      const d = drag.current;
+      if (!d || d.id !== e.pointerId) return;
+      const dx = e.clientX - d.x;
+      const dy = e.clientY - d.y;
+      if (!d.moved) {
+        if (!pastPanSlop(dx, dy)) return;
+        d.moved = true;
+        suppressClickRef.current = true;
+        surface.classList.add("is-panning");
+      }
+      e.preventDefault();
+      applyCamera({ x: d.px + dx, y: d.py + dy, k: camRef.current.k });
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (drag.current || pinch.active || pointers.size > 0) e.preventDefault();
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (!pointers.has(e.pointerId)) {
+        const d = drag.current;
+        if (d && d.id === e.pointerId) {
+          drag.current = null;
+          surface.classList.remove("is-panning");
+        }
+        return;
+      }
+      pointers.delete(e.pointerId);
+      releasePointer(e.pointerId);
+      if (pinch.active && pointers.size < 2) {
+        endPinch();
+        const leftover = pointers.values().next().value as { id: number; cx: number; cy: number } | undefined;
+        if (leftover) {
+          drag.current = {
+            id: leftover.id,
+            x: leftover.cx,
+            y: leftover.cy,
+            px: camRef.current.x,
+            py: camRef.current.y,
+            moved: true,
+          };
+          surface.classList.add("is-panning");
+        } else {
+          surface.classList.remove("is-panning");
+        }
+        e.preventDefault();
+      } else {
+        const d = drag.current;
+        if (d && d.id === e.pointerId) {
+          drag.current = null;
+          if (!pinch.active) surface.classList.remove("is-panning");
+          if (d.moved) e.preventDefault();
+        }
+      }
+      if (pointers.size > 0 || !listening) return;
+      listening = false;
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("pointercancel", onPointerUp, true);
+      window.removeEventListener("touchmove", onTouchMove, true);
+    };
+
+    const ensureListen = () => {
+      if (listening) return;
+      listening = true;
+      window.addEventListener("pointermove", onPointerMove, { passive: false, capture: true });
+      window.addEventListener("pointerup", onPointerUp, { capture: true });
+      window.addEventListener("pointercancel", onPointerUp, { capture: true });
+      window.addEventListener("touchmove", onTouchMove, { passive: false, capture: true });
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      if (ignoreTarget(e.target)) return;
+      pointers.set(e.pointerId, { id: e.pointerId, cx: e.clientX, cy: e.clientY });
+      try {
+        surface.setPointerCapture(e.pointerId);
+      } catch {
+        /* child button targets can refuse capture; window listeners still pan */
+      }
+      ensureListen();
+      if (pointers.size >= 2) {
+        beginPinch();
+        return;
+      }
+      suppressClickRef.current = false;
+      drag.current = {
+        id: e.pointerId,
+        x: e.clientX,
+        y: e.clientY,
+        px: camRef.current.x,
+        py: camRef.current.y,
+        moved: false,
+      };
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        const pt = surfacePoint(e.clientX, e.clientY);
+        applyCamera(zoomCameraAt(camRef.current, pt.x, pt.y, wheelZoomFactor(e.deltaY, e.deltaMode)));
+        return;
+      }
+      applyCamera({
+        x: camRef.current.x - e.deltaX,
+        y: camRef.current.y - e.deltaY,
+        k: camRef.current.k,
+      });
+    };
+
+    const onGestureStart = (e: Event) => {
+      e.preventDefault();
+      if (pointers.size >= 2) return;
+      const ge = e as SafariGestureEvent;
+      const pt = surfacePoint(ge.clientX, ge.clientY);
+      gesture.active = true;
+      gesture.x = pt.x;
+      gesture.y = pt.y;
+      gesture.cam = { ...camRef.current };
+    };
+
+    const onGestureChange = (e: Event) => {
+      e.preventDefault();
+      if (pointers.size >= 2 || !gesture.active) return;
+      const ge = e as SafariGestureEvent;
+      applyCamera(zoomCameraAt(gesture.cam, gesture.x, gesture.y, ge.scale));
+    };
+
+    const onGestureEnd = (e: Event) => {
+      e.preventDefault();
+      gesture.active = false;
+    };
+
+    surface.addEventListener("pointerdown", onPointerDown);
+    surface.addEventListener("wheel", onWheel, { passive: false });
+    surface.addEventListener("gesturestart", onGestureStart as EventListener, { passive: false });
+    surface.addEventListener("gesturechange", onGestureChange as EventListener, { passive: false });
+    surface.addEventListener("gestureend", onGestureEnd as EventListener, { passive: false });
+    return () => {
+      surface.removeEventListener("pointerdown", onPointerDown);
+      surface.removeEventListener("wheel", onWheel);
+      surface.removeEventListener("gesturestart", onGestureStart as EventListener);
+      surface.removeEventListener("gesturechange", onGestureChange as EventListener);
+      surface.removeEventListener("gestureend", onGestureEnd as EventListener);
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("pointercancel", onPointerUp, true);
+      window.removeEventListener("touchmove", onTouchMove, true);
+      if (rafRef.current != null) window.cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    };
+  }, []);
 
   return (
     <div
       className={`timeline-surface${compact ? " is-compact" : ""}${merging ? " is-merging" : ""}${className ? ` ${className}` : ""}`}
+      data-lod={lod}
       ref={surfaceRef}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
     >
       <div className="timeline-aura" aria-hidden />
       <div
         className="timeline-world"
         ref={worldRef}
-        style={{ transform: `translate(${pan.x}px, ${pan.y}px)`, width: worldW, height: worldH }}
+        style={{ width: worldW, height: worldH }}
       >
         <div className="tl-spine is-horizontal" style={{ top: layout.originY, width: worldW }} aria-hidden />
 
@@ -295,8 +556,9 @@ export function TimelineGraph({
           const from = l.node.id === mergeFromId;
           const into = l.node.id === mergeIntoId;
           const leaf = l.isHead ? leafByBranch?.get(l.branch.id) : undefined;
-          const tickPad = 2 + l.tickTier * 18;
-          const labelPad = 12 + l.labelTier * 26;
+          const tickPad = 2 + l.tickTier * 14;
+          const labelPad = 10 + l.labelTier * 20;
+          const flags = timelineLabelFlags(lod, { ...l, selected });
           return (
             <button
               key={l.node.id}
@@ -330,15 +592,23 @@ export function TimelineGraph({
               onMouseLeave={onHoverIdChange ? clearHoverSoon : undefined}
               onFocus={onHoverIdChange ? () => keepHover(l.node.id) : undefined}
               onBlur={onHoverIdChange ? clearHoverSoon : undefined}
-              onClick={() => onNodeClick(l.node, l.branch, l)}
+              onClick={(e) => {
+                if (suppressClickRef.current) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  suppressClickRef.current = false;
+                  return;
+                }
+                onNodeClick(l.node, l.branch, l);
+              }}
             >
-              {(l.showTickStem || l.showTickTime) && (
+              {(flags.showTickStem || flags.showTickTime) && (
                 <span
-                  className={`tl-tick${l.tickAbove ? " is-above" : " is-below"}${l.showTickTime ? "" : " is-stem"}`}
+                  className={`tl-tick${l.tickAbove ? " is-above" : " is-below"}${flags.showTickTime ? "" : " is-stem"}`}
                   aria-hidden
                 >
                   <span className="tl-tick-line" />
-                  {l.showTickTime && (
+                  {flags.showTickTime && (
                     <span className="tl-tick-time">{formatTickTime(l.node.createdAt)}</span>
                   )}
                 </span>
@@ -346,13 +616,13 @@ export function TimelineGraph({
               <span className="tl-orb-core" />
               <span className="tl-orb-ring" />
               {l.isHead && <span className="tl-orb-pulse" aria-hidden />}
-              {l.showLabel && (
+              {flags.showLabel && (
                 <span
-                  className={`tl-orb-label${l.isHead || l.labelMaxChars === 0 ? " is-chip" : " is-whisper"}${l.labelAbove ? " is-above" : " is-below"}`}
+                  className={`tl-orb-label${flags.chip ? " is-chip" : " is-whisper"}${l.labelAbove ? " is-above" : " is-below"}`}
                 >
-                  {l.isHead || l.labelMaxChars === 0 ? (
+                  {flags.chip ? (
                     <>
-                      {l.isAi && (
+                      {l.isAi && !flags.sparse && (
                         <span className="tl-ai-tag" aria-hidden>
                           AI
                         </span>
@@ -379,9 +649,11 @@ export function TimelineGraph({
           >
             <span className="tl-orb-core" />
             <span className="tl-orb-ring" />
-            <span className="tl-orb-label is-chip is-below">
-              <span className="tl-orb-branch">merge</span>
-            </span>
+            {lod !== "graph" && (
+              <span className="tl-orb-label is-chip is-below">
+                <span className="tl-orb-branch">merge</span>
+              </span>
+            )}
           </span>
         )}
 
@@ -398,6 +670,27 @@ export function TimelineGraph({
       </div>
 
       {children}
+
+      <div className="tl-zoom-ctrl" role="group" aria-label="Timeline zoom">
+        <button
+          type="button"
+          aria-label="Zoom in"
+          disabled={busy}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => zoomBy(TIMELINE_ZOOM_STEP)}
+        >
+          +
+        </button>
+        <button
+          type="button"
+          aria-label="Zoom out"
+          disabled={busy}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => zoomBy(1 / TIMELINE_ZOOM_STEP)}
+        >
+          −
+        </button>
+      </div>
     </div>
   );
 }

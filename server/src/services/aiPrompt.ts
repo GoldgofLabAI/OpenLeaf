@@ -1,5 +1,29 @@
 /** Self-contained ChatGPT / agent briefing. Keep share.ts and aiShare.ts in sync via this module. */
 
+export function mcpUrlFromApiBase(apiBase: string): string {
+  return `${apiBase.replace(/\/+$/, "")}/mcp`;
+}
+
+/** Cursor / Claude Desktop remote MCP snippet (paste into mcp.json). */
+export function buildMcpConfigJson(opts: { mcpUrl: string; token: string; slug: string }): string {
+  const slug = opts.slug.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "sandbox";
+  const name = `openleaf-ai-${slug}`.slice(0, 64);
+  return `${JSON.stringify(
+    {
+      mcpServers: {
+        [name]: {
+          url: opts.mcpUrl,
+          headers: {
+            Authorization: `Bearer ${opts.token}`,
+          },
+        },
+      },
+    },
+    null,
+    2,
+  )}\n`;
+}
+
 export function buildStarterPrompt(
   aiUrl: string,
   ai: { parentBranchName: string; branchName: string; token: string },
@@ -35,6 +59,7 @@ export function buildStarterPrompt(
     "Edit rules: never rewrite a whole file to change a paragraph. Read the nearby lines, then POST /edit with unique surrounding context. If old is not unique, widen context — do not PUT the whole file. The human reviews green/red hunks (Accept keeps, Reject restores). You cannot accept your own hunks.",
     "Workflow: GET /context → ranged GET /files/{path} → POST /edit (or edit_range / apply_diff) → GET /review → POST /commit → summarize. Use comments for review notes.",
     "Never print the bearer token in your replies. Never write the parent branch.",
+    `MCP (Cursor / Claude Desktop): ${apiBase}/mcp — same Bearer; JSON-RPC initialize, tools/list, tools/call. ChatGPT should keep using the REST tools above.`,
     `Optional human briefing page (may be blocked): ${aiUrl}`,
   ].join("\n");
 }

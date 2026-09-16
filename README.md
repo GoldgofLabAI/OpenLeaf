@@ -187,6 +187,8 @@ New `trycloudflare.com` hostnames often take 30–90 s (sometimes a couple of mi
 
 OpenLeaf is meant for trusted local or LAN use. On the local port there is **no authentication**: anyone who can reach the host directly can read and write project files and trigger compiles. Do not port-forward it; use the Share feature above (which adds sign-in, project scoping and limits) when someone remote needs access, and only give the credentials to people you trust — a guest with write access can still put arbitrary files into the shared project and run `latexmk` on your machine.
 
+**OpenLeaf contributors are not responsible for the security, privacy, or integrity of your data.** Public Share links, AI collaborator tokens, host-gateway tunnels, and anything a guest or external model does with access you grant are your responsibility. Before creating a public Share or AI link, the UI requires you to check an acknowledgment of these risks. See [SECURITY.md](SECURITY.md) for the full disclaimer and secret-handling guidance.
+
 ## Repository layout
 
 | Path | Role |

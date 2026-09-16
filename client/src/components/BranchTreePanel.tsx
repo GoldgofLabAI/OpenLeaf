@@ -15,7 +15,7 @@ import {
 import type { TimelineBranch, TimelineNode, TimelineView } from "../api/types";
 import { TimelineGraph } from "./TimelineGraph";
 import { formatWhen, isAiBranch } from "./timelineLayout";
-import { applyMergeTipPick } from "./mergeCompose";
+import { applyMergeTipPick, DEFAULT_PRE_MERGE_MESSAGE, mergeStartAllowed } from "./mergeCompose";
 import { nextTimelineEscape } from "./timelineEscape";
 
 type Props = {
@@ -30,7 +30,7 @@ type Props = {
   canPrune?: boolean;
   onMergeStarted?: (session: import("../api/client").MergeSession) => void;
   /** Flush the live editor before starting a merge so uncommitted CRDT edits hit disk. */
-  onBeforeMerge?: () => Promise<void>;
+  onBeforeMerge?: (branchId?: string) => Promise<void>;
   guestBranchId?: string | null;
   leavesVersion?: number;
   onHighlightSince?: (gitHash: string) => void;
@@ -73,6 +73,8 @@ export function BranchTreePanel({
     fromBranchId: string | null;
     intoBranchId: string | null;
   } | null>(null);
+  const [commitDirtyTarget, setCommitDirtyTarget] = useState(true);
+  const [preMergeMessage, setPreMergeMessage] = useState(DEFAULT_PRE_MERGE_MESSAGE);
   const [leafMoreOpen, setLeafMoreOpen] = useState(false);
 
   /** Stick the hover dock so actions (Prune, etc.) remain clickable. */
@@ -349,6 +351,8 @@ export function BranchTreePanel({
     setHoveredId(null);
     setPinnedId(null);
     setLeafMoreOpen(false);
+    setCommitDirtyTarget(true);
+    setPreMergeMessage(DEFAULT_PRE_MERGE_MESSAGE);
     setMergeDraft({
       filling: "from",
       fromBranchId: null,
@@ -386,28 +390,43 @@ export function BranchTreePanel({
     const intoDirty =
       (view.activeBranchId === intoId && !view.viewingNodeId && view.dirty) ||
       Boolean(leafByBranch.get(intoId)?.dirty);
-    if (intoDirty) {
-      setError("Commit or discard edits on the landing tip before merging");
+    if (intoDirty && !commitDirtyTarget) {
+      setError("Commit landing-tip edits first, or check the box to commit them automatically");
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      await onBeforeMerge?.();
+      await onBeforeMerge?.(intoId);
       if (view.activeBranchId !== intoId || view.viewingNodeId) {
         const next = await checkoutProjectTimeline(projectId, { branchId: intoId, nodeId: null });
         setView(next);
         onTimelineChange(next);
+        await onBeforeMerge?.(intoId);
       }
       const session = await startProjectMerge(projectId, {
         sourceBranchId: mergeDraft.fromBranchId,
         targetBranchId: intoId,
+        ...(commitDirtyTarget
+          ? {
+              commitDirtyTarget: true,
+              preMergeMessage: preMergeMessage.trim() || DEFAULT_PRE_MERGE_MESSAGE,
+            }
+          : {}),
       });
       setMergeDraft(null);
       onMergeStarted(session);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Merge failed to start");
+      try {
+        const next = await getProjectTimeline(projectId, guestBranchId ?? undefined);
+        setView(next);
+        onTimelineChange(next);
+        await refreshLeaves();
+      } catch {
+        /* keep the merge error */
+      }
     } finally {
       setBusy(false);
     }
@@ -588,14 +607,45 @@ export function BranchTreePanel({
                 ? `Bring ${fromBranch.name} into ${intoBranch.name}`
                 : "Pick two different tips"}
             </li>
-            <li className={intoBranch && !intoDirty ? "is-ok" : "is-bad"}>
-              {intoBranch && !intoDirty
-                ? "Landing tip is clean"
-                : intoBranch
-                  ? "Landing tip has uncommitted edits — commit first"
-                  : "Landing tip not chosen yet"}
+            <li className={intoBranch && (!intoDirty || commitDirtyTarget) ? "is-ok" : "is-bad"}>
+              {intoBranch && commitDirtyTarget
+                ? intoDirty
+                  ? "Landing-tip edits will be committed first"
+                  : "Uncommitted landing-tip edits will be committed first if any"
+                : intoBranch && !intoDirty
+                  ? "Landing tip is clean"
+                  : intoBranch
+                    ? "Landing tip has uncommitted edits — check the box below, or commit first"
+                    : "Landing tip not chosen yet"}
             </li>
           </ul>
+          {intoBranch && (
+            <div className="tl-merge-precommit">
+              <label className="share-check">
+                <input
+                  type="checkbox"
+                  checked={commitDirtyTarget}
+                  onChange={(e) => setCommitDirtyTarget(e.target.checked)}
+                />
+                <span>
+                  <strong>Commit uncommitted edits, then merge</strong>
+                  <span className="share-muted"> — snapshot the landing tip so you don’t have to leave and click Commit first</span>
+                </span>
+              </label>
+              {commitDirtyTarget && (
+                <label className="tl-merge-precommit-msg">
+                  Commit message
+                  <input
+                    type="text"
+                    value={preMergeMessage}
+                    onChange={(e) => setPreMergeMessage(e.target.value)}
+                    placeholder={DEFAULT_PRE_MERGE_MESSAGE}
+                    maxLength={200}
+                  />
+                </label>
+              )}
+            </div>
+          )}
           <div className="history-drawer-actions tl-merge-composer-actions">
             <button
               type="button"
@@ -611,10 +661,25 @@ export function BranchTreePanel({
             <button
               type="button"
               className="btn btn-primary"
-              disabled={busy || !fromBranch || !intoBranch || intoDirty}
+              disabled={
+                busy ||
+                !mergeStartAllowed({
+                  fromSet: Boolean(fromBranch),
+                  intoSet: Boolean(intoBranch),
+                  distinct: Boolean(fromBranch && intoBranch && fromBranch.id !== intoBranch.id),
+                  intoDirty,
+                  commitDirtyTarget,
+                })
+              }
               onClick={() => void confirmMerge()}
             >
-              {busy ? "Starting…" : "Start merge"}
+              {busy
+                ? commitDirtyTarget
+                  ? "Committing…"
+                  : "Starting…"
+                : commitDirtyTarget
+                  ? "Commit & start merge"
+                  : "Start merge"}
             </button>
           </div>
         </div>
