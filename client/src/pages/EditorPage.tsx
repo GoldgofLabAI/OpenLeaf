@@ -210,6 +210,8 @@ export function EditorPage() {
   branchIdRef.current = branchId;
   const [timelineCanEdit, setTimelineCanEdit] = useState(true);
   const [viewingGitHash, setViewingGitHash] = useState<string | null>(null);
+  const viewingGitHashRef = useRef(viewingGitHash);
+  viewingGitHashRef.current = viewingGitHash;
   const [branchLabel, setBranchLabel] = useState(guest?.share.branchName || "main");
   const [project, setProject] = useState<ProjectMeta | null>(null);
   const collab = useProjectCollab(project?.id === id ? id || undefined : undefined, guestIdentity, branchId);
@@ -939,9 +941,12 @@ export function EditorPage() {
     if (!id || compileLock.current || !canCompile) return false;
     compileLock.current = true;
     const startedOn = branchIdRef.current;
+    const startedAt = viewingGitHashRef.current;
+    const stillHere = () =>
+      branchIdRef.current === startedOn && viewingGitHashRef.current === startedAt;
     setStatus("compiling");
-    const checkpointLabel = viewingGitHash
-      ? `checkpoint ${viewingGitHash.slice(0, 7)}`
+    const checkpointLabel = startedAt
+      ? `checkpoint ${startedAt.slice(0, 7)}`
       : branchLabel;
     if (!opts?.auto) {
       setLog("");
@@ -958,13 +963,13 @@ export function EditorPage() {
         id,
         {
           onLog: (chunk) => {
-            if (branchIdRef.current !== startedOn) return;
+            if (!stillHere()) return;
             setLog((prev) => prev + chunk);
           },
         },
-        viewingGitHash ? { at: viewingGitHash } : { branchId: startedOn },
+        startedAt ? { at: startedAt } : { branchId: startedOn },
       );
-      if (branchIdRef.current !== startedOn) return false;
+      if (!stillHere()) return false;
       setLog((prev) => prev || result.log);
       if (result.ok) {
         setStatus("ok");
@@ -976,18 +981,18 @@ export function EditorPage() {
       if (opts?.auto) setLogOpen(true);
       return false;
     } catch (err) {
-      if (branchIdRef.current !== startedOn) return false;
+      if (!stillHere()) return false;
       setStatus("err");
       setLog((prev) => `${prev}\n${err instanceof Error ? err.message : "Compile failed"}`);
       if (opts?.auto) setLogOpen(true);
       return false;
     } finally {
       compileLock.current = false;
-      if (branchIdRef.current !== startedOn) {
+      if (!stillHere()) {
         void runCompileRef.current({ auto: true });
       }
     }
-  }, [id, refreshTree, canCompile, branchLabel, viewingGitHash]);
+  }, [id, refreshTree, canCompile, branchLabel]);
 
   const runCompileRef = useRef(runCompile);
   runCompileRef.current = runCompile;
@@ -1319,11 +1324,18 @@ export function EditorPage() {
             ? `Working on ${view.activeBranch.name}`
             : `Viewing checkpoint ${view.viewingGitHash?.slice(0, 7) ?? ""} (read-only)`,
       );
-      // Force file reload for the new tip / snapshot.
+      // Force file reload for the new tip / snapshot. Clear lastTextPath so the
+      // loader treats this as a real navigation even if the path string is unchanged.
       lastTextPathRef.current = null;
       const path = activePathRef.current;
+      setContent("");
+      setSavedContent("");
+      setYText(null);
+      setFileReady(false);
       setActivePath(null);
-      window.setTimeout(() => setActivePath(path), 0);
+      window.setTimeout(() => {
+        if (path) setActivePath(path);
+      }, 0);
       void refreshTree();
     },
     [showSyncToast, refreshTree, guestBranchId],
@@ -2025,13 +2037,17 @@ export function EditorPage() {
                       : "Save"}
             </button>
           )}
-          {readOnly && canCompile && (
+          {(readOnly || Boolean(viewingGitHash)) && canCompile && (
             <button
               type="button"
               className="btn btn-primary"
               onClick={() => void runCompile()}
               disabled={status === "compiling"}
-              title="Recompile the current project"
+              title={
+                viewingGitHash
+                  ? `Recompile checkpoint ${viewingGitHash.slice(0, 7)}`
+                  : "Recompile the current project"
+              }
             >
               {status === "compiling" ? "Compiling…" : "Recompile"}
             </button>
@@ -2552,7 +2568,13 @@ export function EditorPage() {
                   url={pdfBust != null ? pdfUrl(id, pdfBust, branchId, viewingGitHash) : null}
                   emptyHint={
                     viewingGitHash
-                      ? "Historical leaf — PDF preview is for the live tip."
+                      ? status === "compiling"
+                        ? `Building PDF for checkpoint ${viewingGitHash.slice(0, 7)}…`
+                        : status === "err"
+                          ? "PDF build failed for this checkpoint — check the log or click Recompile."
+                          : canCompile
+                            ? `Preparing PDF for checkpoint ${viewingGitHash.slice(0, 7)}…`
+                            : "No PDF for this checkpoint yet (compile disabled)."
                       : status === "compiling"
                         ? `Building PDF for “${branchLabel}”…`
                         : status === "err"
