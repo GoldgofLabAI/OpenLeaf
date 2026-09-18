@@ -109,6 +109,15 @@ function releaseCanvas(canvas: HTMLCanvasElement): void {
   canvas.height = 0;
 }
 
+/** Tear down painted canvases so GPU/backing-store memory is released promptly. */
+function clearPdfDom(container: HTMLElement | null): void {
+  if (!container) return;
+  container.querySelectorAll("canvas").forEach((node) => {
+    releaseCanvas(node as HTMLCanvasElement);
+  });
+  container.innerHTML = "";
+}
+
 export function PdfViewer({
   url,
   emptyHint,
@@ -143,6 +152,16 @@ export function PdfViewer({
 
   scaleRef.current = scale;
 
+  /** Drop the resident PDF immediately — only one document should stay in memory. */
+  const dropResidentDoc = () => {
+    paintTokenRef.current += 1;
+    const prev = docRef.current;
+    docRef.current = null;
+    pageSizesRef.current = [];
+    clearPdfDom(containerRef.current);
+    prev?.destroy().catch(() => undefined);
+  };
+
   useEffect(() => {
     if (!fullscreen) return;
     const onKey = (ev: KeyboardEvent) => {
@@ -164,21 +183,19 @@ export function PdfViewer({
 
   // Load / replace the PDF document only when the URL changes.
   useEffect(() => {
+    // Always release the previous PDF before starting a new load (or clearing).
+    dropResidentDoc();
+    setPageCount(0);
+    setPagesReady(false);
+
     if (!url) {
-      paintTokenRef.current += 1;
-      docRef.current?.destroy().catch(() => undefined);
-      docRef.current = null;
-      pageSizesRef.current = [];
-      setPageCount(0);
-      setPagesReady(false);
       setLoading(false);
       setError(null);
-      if (containerRef.current) containerRef.current.innerHTML = "";
       return;
     }
 
     let cancelled = false;
-    let transferred = false;
+    let settledDoc: PDFDocumentProxy | null = null;
     const loadingTask = pdfjs.getDocument(url);
     setLoading(true);
     setError(null);
@@ -186,27 +203,31 @@ export function PdfViewer({
     (async () => {
       try {
         const doc = await loadingTask.promise;
+        settledDoc = doc;
         if (cancelled) {
+          settledDoc = null;
           await doc.destroy().catch(() => undefined);
           return;
         }
         const sizes: Array<{ width: number; height: number }> = [];
         for (let i = 1; i <= doc.numPages; i += 1) {
           const page = await doc.getPage(i);
-          const viewport = page.getViewport({ scale: 1 });
-          sizes.push({ width: viewport.width, height: viewport.height });
+          try {
+            const viewport = page.getViewport({ scale: 1 });
+            sizes.push({ width: viewport.width, height: viewport.height });
+          } finally {
+            page.cleanup();
+          }
         }
         if (cancelled) {
+          settledDoc = null;
           await doc.destroy().catch(() => undefined);
           return;
         }
         paintTokenRef.current += 1;
-        const prev = docRef.current;
         docRef.current = doc;
-        transferred = true;
+        settledDoc = null; // ownership moved to docRef
         pageSizesRef.current = sizes;
-        prev?.destroy().catch(() => undefined);
-        if (containerRef.current) containerRef.current.innerHTML = "";
         renderedScaleRef.current = scaleRef.current;
         setPagesReady(false);
         setPageCount(doc.numPages);
@@ -230,17 +251,26 @@ export function PdfViewer({
     return () => {
       cancelled = true;
       paintTokenRef.current += 1;
-      if (!transferred) {
-        void Promise.resolve(loadingTask.destroy()).catch(() => undefined);
+      void Promise.resolve(loadingTask.destroy()).catch(() => undefined);
+      // If load finished but we never handed off (or handed off then URL changed),
+      // destroy whatever this effect still owns.
+      if (settledDoc) {
+        settledDoc.destroy().catch(() => undefined);
+        settledDoc = null;
+      }
+      if (docRef.current) {
+        const owned = docRef.current;
+        docRef.current = null;
+        pageSizesRef.current = [];
+        clearPdfDom(containerRef.current);
+        owned.destroy().catch(() => undefined);
       }
     };
   }, [url]);
 
   useEffect(() => {
     return () => {
-      paintTokenRef.current += 1;
-      docRef.current?.destroy().catch(() => undefined);
-      docRef.current = null;
+      dropResidentDoc();
     };
   }, []);
 
@@ -352,8 +382,9 @@ export function PdfViewer({
         painting.delete(pageNum);
         return;
       }
+      let page: Awaited<ReturnType<PDFDocumentProxy["getPage"]>> | null = null;
       try {
-        const page = await doc.getPage(pageNum);
+        page = await doc.getPage(pageNum);
         if (cancelled || token !== paintTokenRef.current || !visible.has(pageNum)) return;
         const viewport = page.getViewport({ scale: renderScale });
         wrap.style.width = `${viewport.width}px`;
@@ -380,6 +411,7 @@ export function PdfViewer({
       } finally {
         inflight.delete(pageNum);
         painting.delete(pageNum);
+        page?.cleanup();
       }
     };
 
@@ -426,6 +458,11 @@ export function PdfViewer({
       observer.disconnect();
       for (const task of inflight.values()) task.cancel();
       inflight.clear();
+      // Release painted bitmaps when scale/doc changes; placeholders stay until
+      // the next layout pass rebuilds wraps.
+      container.querySelectorAll("canvas").forEach((node) => {
+        releaseCanvas(node as HTMLCanvasElement);
+      });
     };
   }, [docVersion, scale, pageCount]);
 
