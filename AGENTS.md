@@ -58,4 +58,4 @@ npm test
 
 ## Prerequisites
 
-Node 20+, TeX Live (`pdflatex`, `bibtex`; `latexmk` optional but preferred), Git (if `git.enabled`).
+Node 20+, TeX Live (`pdflatex`, `bibtex`; `latexmk` optional but preferred), `latexdiff` (optional; **Download track-changes PDF**), Git (if `git.enabled`).
