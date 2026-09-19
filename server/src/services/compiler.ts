@@ -23,7 +23,7 @@ export type CompileResult = {
 };
 
 /** TeX installs (TinyTeX, MacTeX) often sit outside the PATH of GUI/IDE shells. */
-function texEnv(): NodeJS.ProcessEnv {
+export function texEnv(): NodeJS.ProcessEnv {
   const home = os.homedir();
   const candidates = [
     path.join(home, "Library/TinyTeX/bin/universal-darwin"),
@@ -181,6 +181,15 @@ async function withProjectCompileLock<T>(id: string, fn: () => Promise<T>): Prom
   }
 }
 
+/** Compile an already-resolved tree (snapshot, worktree, or scratch). Does not take the live lock. */
+export async function compileProjectAtRoot(
+  id: string,
+  onChunk?: (chunk: string) => void,
+  rootDir?: string,
+): Promise<CompileResult> {
+  return compileProjectUnlocked(id, onChunk, rootDir);
+}
+
 async function compileProjectUnlocked(
   id: string,
   onChunk?: (chunk: string) => void,
@@ -255,13 +264,13 @@ export async function compileProject(
     if (at) {
       onChunk?.(`[openleaf] compiling checkpoint ${at.slice(0, 7)} (read-only snapshot)\n`);
       const root = await ensureSnapshotRoot(id, at);
-      return compileProjectUnlocked(id, onChunk, root);
+      return compileProjectAtRoot(id, onChunk, root);
     }
 
     const branchId = opts?.branchId ?? "main";
     onChunk?.(`[openleaf] flushing collaborative edits to disk (${branchId})\n`);
     await flushProjectRoom(id, { commit: false, branchId });
     const root = await ensureBranchRoot(id, branchId);
-    return compileProjectUnlocked(id, onChunk, root);
+    return compileProjectAtRoot(id, onChunk, root);
   });
 }

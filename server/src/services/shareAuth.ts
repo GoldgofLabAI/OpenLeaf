@@ -177,6 +177,11 @@ export function guestRouteDenial(req: Request, session: ShareSession): { status:
   if (sub.startsWith("/compile")) {
     return s.allowCompile ? null : { status: 403, error: "Compiling is disabled for this link" };
   }
+  if (sub.startsWith("/track-changes")) {
+    if (!s.allowCompile) return { status: 403, error: "Compiling is disabled for this link" };
+    if (!s.allowDownload) return { status: 403, error: "Downloads are disabled for this link" };
+    return null;
+  }
   if (sub.startsWith("/download")) {
     if (!s.allowDownload) return { status: 403, error: "Downloads are disabled for this link" };
     return null;

@@ -15,6 +15,7 @@ import {
   getProjectMerge,
   getProjectTimeline,
   getTree,
+  generateTrackChanges,
   listProjectComments,
   mkdirProjectPath,
   pdfUrl,
@@ -22,6 +23,7 @@ import {
   renameProjectPath,
   synctexForward,
   synctexLookup,
+  trackChangesDownloadUrl,
   writeProjectFile,
   type MergeSession,
 } from "../api/client";
@@ -342,6 +344,9 @@ export function EditorPage() {
   const [commentThreads, setCommentThreads] = useState<CommentThread[]>([]);
   const [focusCommentId, setFocusCommentId] = useState<string | null>(null);
   const [lastCommit, setLastCommit] = useState<string | null>(null);
+  const [tipGitHash, setTipGitHash] = useState<string | null>(null);
+  const [trackChangesBusy, setTrackChangesBusy] = useState(false);
+  const pendingTrackChangesRef = useRef(false);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const [flushedContent, setFlushedContent] = useState("");
   const saveLock = useRef(false);
@@ -1160,7 +1165,10 @@ export function EditorPage() {
           view.canEdit && (!guestBranchId || view.activeBranchId === guestBranchId),
         );
         setViewingGitHash(view.viewingGitHash ?? null);
-        if (view.headNode) setLastCommit(view.headNode.gitHash.slice(0, 7));
+        if (view.headNode) {
+          setLastCommit(view.headNode.gitHash.slice(0, 7));
+          setTipGitHash(view.headNode.gitHash);
+        }
       } catch {
         /* timeline optional until first open */
       }
@@ -1292,6 +1300,65 @@ export function EditorPage() {
     [id, showSyncToast],
   );
 
+  const runTrackChangesPdf = useCallback(
+    async (fromHash: string) => {
+      if (!id) return;
+      const toHash = viewingGitHash || tipGitHash;
+      if (!toHash) {
+        setError("Commit on the timeline first");
+        return;
+      }
+      if (!canCompile || !canDownload) {
+        setError("Track-changes PDF needs compile and download permission");
+        return;
+      }
+      setError(null);
+      setTrackChangesBusy(true);
+      setLog("");
+      setLogOpen(true);
+      setLog(
+        `[openleaf] Building track-changes PDF ${fromHash.slice(0, 7)} → ${toHash.slice(0, 7)}…\n`,
+      );
+      try {
+        const result = await generateTrackChanges(id, fromHash, toHash, {
+          onLog: (chunk) => setLog((prev) => prev + chunk),
+        });
+        setLog((prev) => prev || result.log);
+        if (!result.ok) {
+          setError("Track-changes PDF did not compile. See the log.");
+          return;
+        }
+        showSyncToast(
+          result.cached
+            ? `Downloaded cached ${result.from.shortHash} → ${result.to.shortHash}`
+            : `Track-changes PDF ${result.from.shortHash} → ${result.to.shortHash}`,
+        );
+        const a = document.createElement("a");
+        a.href = trackChangesDownloadUrl(id, result.from.hash, result.to.hash);
+        a.download = `${id}-changes-${result.from.shortHash}-${result.to.shortHash}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Track-changes PDF failed");
+      } finally {
+        setTrackChangesBusy(false);
+      }
+    },
+    [id, viewingGitHash, tipGitHash, canCompile, canDownload, showSyncToast],
+  );
+
+  const beginTrackChangesDownload = useCallback(() => {
+    setToolbarMoreOpen(false);
+    if (!diffSince) {
+      pendingTrackChangesRef.current = true;
+      setComparePickerOpen(true);
+      showSyncToast("Pick a baseline leaf to compare against");
+      return;
+    }
+    void runTrackChangesPdf(diffSince);
+  }, [diffSince, runTrackChangesPdf, showSyncToast]);
+
   const onHighlightSinceCommit = useCallback(
     (commit: GitCommitInfo | string) => {
       const hash = typeof commit === "string" ? commit : commit.hash;
@@ -1314,7 +1381,10 @@ export function EditorPage() {
         view.canEdit && (!guestBranchId || view.activeBranchId === guestBranchId),
       );
       setViewingGitHash(view.viewingGitHash ?? null);
-      if (view.headNode) setLastCommit(view.headNode.gitHash.slice(0, 7));
+      if (view.headNode) {
+        setLastCommit(view.headNode.gitHash.slice(0, 7));
+        setTipGitHash(view.headNode.gitHash);
+      }
       const observing =
         Boolean(guestBranchId) && view.activeBranchId !== guestBranchId;
       showSyncToast(
@@ -1355,6 +1425,7 @@ export function EditorPage() {
         identityId: collab.identity?.id,
       });
       setLastCommit(result.hash.slice(0, 7));
+      setTipGitHash(result.hash);
       onTimelineChange(result.timeline);
       showSyncToast(`Committed ${result.hash.slice(0, 7)}`);
     } catch (err) {
@@ -2254,6 +2325,17 @@ export function EditorPage() {
                     >
                       <span>Download ZIP</span>
                     </a>
+                    {canCompile && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={trackChangesBusy}
+                        title="Compare-documents PDF of the compare baseline vs this checkpoint. Uncommitted edits are not included."
+                        onClick={() => beginTrackChangesDownload()}
+                      >
+                        {trackChangesBusy ? "Building track-changes PDF…" : "Download track-changes PDF"}
+                      </button>
+                    )}
                   </>
                 )}
               </div>,
@@ -2649,8 +2731,17 @@ export function EditorPage() {
         projectId={id}
         open={comparePickerOpen}
         selectedHash={diffSince || null}
-        onClose={() => setComparePickerOpen(false)}
-        onPick={onPickCompareBaseline}
+        onClose={() => {
+          pendingTrackChangesRef.current = false;
+          setComparePickerOpen(false);
+        }}
+        onPick={(node, branch) => {
+          onPickCompareBaseline(node, branch);
+          if (pendingTrackChangesRef.current) {
+            pendingTrackChangesRef.current = false;
+            void runTrackChangesPdf(node.gitHash);
+          }
+        }}
       />
     </div>
   );

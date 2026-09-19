@@ -10,6 +10,7 @@ import type {
   ProjectMeta,
   SynctexForwardHit,
   SynctexHit,
+  TrackChangesResult,
   TreeNode,
 } from "./types";
 
@@ -427,6 +428,11 @@ export function downloadUrl(id: string, format: "pdf" | "zip", branchId?: string
   return `/api/projects/${encodeURIComponent(id)}/download?${params}`;
 }
 
+export function trackChangesDownloadUrl(id: string, from: string, to: string): string {
+  const params = new URLSearchParams({ format: "track-changes", from, to });
+  return `/api/projects/${encodeURIComponent(id)}/download?${params}`;
+}
+
 export function synctexLookup(
   id: string,
   page: number,
@@ -580,6 +586,69 @@ export function compileProject(
           }
         }
         if (!result) throw new Error("Compile ended without result");
+        resolve(result);
+      })
+      .catch(reject);
+  });
+}
+
+export function generateTrackChanges(
+  id: string,
+  from: string,
+  to: string,
+  handlers: CompileHandlers = {},
+): Promise<TrackChangesResult> {
+  return new Promise((resolve, reject) => {
+    fetch(`/api/projects/${encodeURIComponent(id)}/track-changes?stream=1`, {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to }),
+    })
+      .then(async (res) => {
+        if (!res.ok || !res.body) {
+          let message = "Track-changes request failed";
+          try {
+            const body = (await res.json()) as { error?: string };
+            if (body.error) message = body.error;
+          } catch {
+            /* ignore */
+          }
+          throw new Error(message);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let result: TrackChangesResult | null = null;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+          for (const part of parts) {
+            const lines = part.split("\n");
+            let event = "message";
+            let data = "";
+            for (const line of lines) {
+              if (line.startsWith("event:")) event = line.slice(6).trim();
+              if (line.startsWith("data:")) data += line.slice(5).trim();
+            }
+            if (!data) continue;
+            const parsed = JSON.parse(data) as Record<string, unknown>;
+            if (event === "log" && typeof parsed.chunk === "string") {
+              handlers.onLog?.(parsed.chunk);
+            } else if (event === "status" && typeof parsed.state === "string") {
+              handlers.onStatus?.(parsed.state);
+            } else if (event === "done") {
+              result = parsed as unknown as TrackChangesResult;
+            } else if (event === "error") {
+              throw new Error(String(parsed.error ?? "Track-changes PDF failed"));
+            }
+          }
+        }
+        if (!result) throw new Error("Track-changes ended without result");
         resolve(result);
       })
       .catch(reject);

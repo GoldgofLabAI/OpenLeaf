@@ -950,6 +950,54 @@ data: ${JSON.stringify(data)}
   }
 });
 
+projectsRouter.post("/:id/track-changes", async (req, res) => {
+  const id = req.params.id;
+  const stream = req.query.stream === "1" || req.headers.accept?.includes("text/event-stream");
+  const schema = z.object({
+    from: z.string().min(7).max(40).regex(/^[0-9a-f]+$/i),
+    to: z.string().min(7).max(40).regex(/^[0-9a-f]+$/i),
+  });
+
+  const run = async (onChunk?: (chunk: string) => void) => {
+    const body = schema.parse(req.body ?? {});
+    const { generateTrackChanges } = await import("../services/trackChanges.js");
+    return generateTrackChanges(id, body.from, body.to, onChunk);
+  };
+
+  if (stream) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const send = (event: string, data: unknown) => {
+      res.write(`event: ${event}
+data: ${JSON.stringify(data)}
+
+`);
+    };
+
+    try {
+      send("status", { state: "running" });
+      const result = await run((chunk) => {
+        send("log", { chunk });
+      });
+      send("done", result);
+    } catch (err) {
+      send("error", { error: publicErrorMessage(err, "Track-changes PDF failed") });
+    }
+    res.end();
+    return;
+  }
+
+  try {
+    const result = await run();
+    res.status(result.ok ? 200 : 422).json(result);
+  } catch (err) {
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
+  }
+});
+
 projectsRouter.get("/:id/pdf", async (req, res) => {
   try {
     const at = typeof req.query.at === "string" ? req.query.at.trim() : undefined;
@@ -1078,11 +1126,32 @@ projectsRouter.get("/:id/download", async (req, res) => {
       fs.createReadStream(pdf).pipe(res);
       return;
     }
+    if (format === "track-changes") {
+      const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+      const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+      if (!from || !to) {
+        res.status(400).json({ error: "from and to commit hashes are required" });
+        return;
+      }
+      const { findCachedTrackChangesPdf } = await import("../services/trackChanges.js");
+      const cached = await findCachedTrackChangesPdf(req.params.id, from, to);
+      if (!cached) {
+        res.status(404).json({ error: "Track-changes PDF not generated yet" });
+        return;
+      }
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${req.params.id}-changes-${cached.from.shortHash}-${cached.to.shortHash}.pdf"`,
+      );
+      fs.createReadStream(cached.pdf).pipe(res);
+      return;
+    }
     if (format === "zip") {
       streamProjectZip(req.params.id, res);
       return;
     }
-    res.status(400).json({ error: "format must be pdf or zip" });
+    res.status(400).json({ error: "format must be pdf, zip, or track-changes" });
   } catch (err) {
     res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }

@@ -5,7 +5,13 @@ import { isGuestForbiddenWritePath, isHostMetadataPath } from "./projectFs.js";
 import { guestRouteDenial, parseCookies } from "./shareAuth.js";
 import type { ShareSession } from "./share.js";
 
-function session(over: { projectId?: string; readOnly?: boolean; allowHistory?: boolean } = {}): ShareSession {
+function session(over: {
+  projectId?: string;
+  readOnly?: boolean;
+  allowHistory?: boolean;
+  allowCompile?: boolean;
+  allowDownload?: boolean;
+} = {}): ShareSession {
   return {
     id: "s1",
     projectId: over.projectId ?? "demo",
@@ -23,8 +29,8 @@ function session(over: { projectId?: string; readOnly?: boolean; allowHistory?: 
       maxIps: 8,
       maxGuests: 8,
       readOnly: over.readOnly ?? false,
-      allowCompile: true,
-      allowDownload: true,
+      allowCompile: over.allowCompile ?? true,
+      allowDownload: over.allowDownload ?? true,
       allowHistory: over.allowHistory ?? true,
     },
     ips: new Map(),
@@ -120,5 +126,13 @@ describe("guestRouteDenial", () => {
   it("rejects other projects", () => {
     const denial = guestRouteDenial(req("/api/projects/other/tree", "GET"), s);
     assert.equal(denial?.status, 403);
+  });
+
+  it("gates track-changes on compile and download", () => {
+    assert.equal(guestRouteDenial(req(`${prefix}/track-changes`, "POST"), s), null);
+    const noCompile = session({ allowCompile: false });
+    assert.equal(guestRouteDenial(req(`${prefix}/track-changes`, "POST"), noCompile)?.status, 403);
+    const noDownload = session({ allowDownload: false });
+    assert.equal(guestRouteDenial(req(`${prefix}/track-changes`, "POST"), noDownload)?.status, 403);
   });
 });
