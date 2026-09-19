@@ -16,6 +16,7 @@ loadConfig(true);
 
 const { ensureProjectGit } = await import("./projectGit.js");
 const {
+  annotateReplacedTables,
   expandChangedMetricsMacros,
   flattenTexFile,
   generateTrackChanges,
@@ -135,6 +136,42 @@ describe("flattenTexFile / metrics expand", () => {
     assert.match(r.new, /AUC was \{0\.93\}\./);
     assert.match(r.old, /\\newcommand\{\\Score\}\{0\.91\}/);
     assert.match(r.new, /\\newcommand\{\\Score\}\{0\.93\}/);
+  });
+
+  it("adds a Table changed note on atomic tabular replacements", () => {
+    const raw = `\\begin{document}
+\\DIFdelbegin %DIFDELCMD < \\begin{tabular}{ll}
+%DIFDELCMD < a & 1 \\\\
+%DIFDELCMD < \\end{tabular}
+%DIFDELCMD <  %%%
+\\DIFdelend \\DIFaddbegin \\begin{tabular}{ll}
+a & 2 \\\\
+\\end{tabular}
+ \\DIFaddend
+\\end{document}
+`;
+    const r = annotateReplacedTables(raw);
+    assert.equal(r.tables.changed, 1);
+    assert.equal(r.tables.removed, 0);
+    assert.match(r.tex, /\\OpenLeafTableChanged/);
+    assert.match(r.tex, /Table changed/);
+    assert.doesNotMatch(r.tex, /\\OpenLeafTableRemoved/);
+  });
+
+  it("adds a Table removed note when a tabular is deleted with no replacement", () => {
+    const raw = `\\begin{document}
+\\DIFdelbegin %DIFDELCMD < \\begin{tabular}{ll}
+%DIFDELCMD < gone \\\\
+%DIFDELCMD < \\end{tabular}
+\\DIFdelend
+more prose
+\\end{document}
+`;
+    const r = annotateReplacedTables(raw);
+    assert.equal(r.tables.changed, 0);
+    assert.equal(r.tables.removed, 1);
+    assert.match(r.tex, /\\OpenLeafTableRemoved/);
+    assert.match(r.tex, /Table removed/);
   });
 });
 
@@ -271,7 +308,7 @@ a & 2 \\\\
 \\end{tabular}
 \\end{document}
 `;
-    const { oldHash, newHash } = await twoCommitProject(
+    const { dir, oldHash, newHash } = await twoCommitProject(
       "tc-table",
       { "main.tex": oldTex },
       { "main.tex": newTex },
@@ -279,5 +316,8 @@ a & 2 \\\\
     const result = await generateTrackChanges("tc-table", oldHash, newHash);
     assert.equal(result.ok, true, result.log.slice(-800));
     assert.ok(result.pdfRelative);
+    const marked = fs.readFileSync(path.join(dir, result.scratchRelative, "main.tex"), "utf8");
+    assert.match(marked, /\\OpenLeafTableChanged/);
+    assert.match(marked, /Table changed/);
   });
 });

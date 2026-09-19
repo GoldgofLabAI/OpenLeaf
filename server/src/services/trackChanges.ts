@@ -10,10 +10,69 @@ import { ensureSnapshotRoot } from "./timeline.js";
 const HASH_RE = /^[0-9a-f]{7,40}$/i;
 const LATEXDIFF_TIMEOUT_MS = 120_000;
 const MARKER = ".openleaf-track-changes-ok";
+/** Bump when marked-tex post-processing changes so old scratch PDFs are rebuilt. */
+const MARKER_VERSION = "2";
 
 /** Treat these as atomic replacements so cell-level latexdiff does not break compile. */
 export const LATEXDIFF_PICTURE_ENV =
   "(?:picture|DIFnomarkup|tabular|tabularx|longtable)[\\w\\d*@]*";
+
+const TABLE_ENV = String.raw`(?:tabular\*?|tabularx|longtable)`;
+const TABLE_BEGIN = new RegExp(String.raw`\\begin\{${TABLE_ENV}\}`);
+const TABLE_DEL_BEGIN = new RegExp(String.raw`DIFDELCMD < \\begin\{${TABLE_ENV}\}`);
+const ADD_TABLE_RE = new RegExp(
+  String.raw`(\\DIFaddbegin)(\s*)(?=\\begin\{${TABLE_ENV}\})`,
+  "g",
+);
+const DEL_BLOCK_RE = /\\DIFdelbegin[\s\S]*?\\DIFdelend/g;
+
+export type TableAnnotations = { changed: number; removed: number };
+
+function injectTableNotePreamble(tex: string, snippet: string): string {
+  if (tex.includes("%DIF OPENLEAF TABLE NOTES")) return tex;
+  const begin = tex.indexOf("\\begin{document}");
+  if (begin < 0) return snippet + tex;
+  return `${tex.slice(0, begin)}${snippet}${tex.slice(begin)}`;
+}
+
+/**
+ * Cell-level table markup is disabled (PICTUREENV). latexdiff then comments
+ * out the old table and prints the new one unmarked — so insert a visible note.
+ */
+export function annotateReplacedTables(tex: string): { tex: string; tables: TableAnnotations } {
+  let changed = 0;
+  let marked = tex.replace(ADD_TABLE_RE, (_m, begin: string, space: string) => {
+    changed += 1;
+    return `${begin}${space}\\OpenLeafTableChanged `;
+  });
+
+  let removed = 0;
+  marked = marked.replace(DEL_BLOCK_RE, (block, offset: number, whole: string) => {
+    if (!TABLE_DEL_BEGIN.test(block)) return block;
+    const after = whole.slice(offset + block.length);
+    if (/^\s*\\DIFaddbegin/.test(after) && TABLE_BEGIN.test(after.slice(0, 400))) {
+      return block;
+    }
+    removed += 1;
+    return `${block}\\OpenLeafTableRemoved `;
+  });
+
+  if (changed + removed > 0) {
+    const macros: string[] = ["%DIF OPENLEAF TABLE NOTES"];
+    if (changed) {
+      macros.push(
+        "\\providecommand{\\OpenLeafTableChanged}{\\par\\noindent{\\protect\\color{blue}\\small\\itshape Table changed.}\\par}",
+      );
+    }
+    if (removed) {
+      macros.push(
+        "\\providecommand{\\OpenLeafTableRemoved}{\\par\\noindent{\\protect\\color{red}\\small\\itshape Table removed.}\\par}",
+      );
+    }
+    marked = injectTableNotePreamble(marked, `${macros.join("\n")}\n`);
+  }
+  return { tex: marked, tables: { changed, removed } };
+}
 
 export type TrackChangesResult = CompileResult & {
   from: GitCommitInfo;
@@ -302,6 +361,12 @@ export function trackChangesPdfIfCached(
 ): string | null {
   const scratch = trackChangesScratchDir(id, fromHash, toHash);
   if (!fs.existsSync(markerPath(scratch))) return null;
+  try {
+    const raw = fs.readFileSync(markerPath(scratch), "utf8");
+    if (!raw.split(/\n/).includes(`v${MARKER_VERSION}`)) return null;
+  } catch {
+    return null;
+  }
   const pdf = scratchPdf(id, scratch, mainFile);
   return fs.existsSync(pdf) ? pdf : null;
 }
@@ -436,13 +501,19 @@ async function generateTrackChangesUnlocked(
 
   const marked = ld.stdout;
   if (!marked.trim()) throw err(500, "latexdiff produced an empty file");
-  await fsPromises.writeFile(diffOut, marked, "utf8");
+  const annotated = annotateReplacedTables(marked);
+  if (annotated.tables.changed + annotated.tables.removed > 0) {
+    onChunk?.(
+      `[openleaf] table notes: ${annotated.tables.changed} changed, ${annotated.tables.removed} removed\n`,
+    );
+  }
+  await fsPromises.writeFile(diffOut, annotated.tex, "utf8");
 
   const compiled = await compileProjectAtRoot(id, onChunk, scratch);
   if (compiled.ok) {
     await fsPromises.writeFile(
       markerPath(scratch),
-      `${from.hash}\n${to.hash}\n${mainFile}\n`,
+      `${from.hash}\n${to.hash}\n${mainFile}\nv${MARKER_VERSION}\n`,
       "utf8",
     );
   }
