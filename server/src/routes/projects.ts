@@ -1000,6 +1000,26 @@ data: ${JSON.stringify(data)}
 
 projectsRouter.get("/:id/pdf", async (req, res) => {
   try {
+    const mode = typeof req.query.mode === "string" ? req.query.mode.trim() : "";
+    if (mode === "track-changes") {
+      const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+      const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+      if (!from || !to) {
+        res.status(400).json({ error: "from and to commit hashes are required" });
+        return;
+      }
+      const { findCachedTrackChangesPdf } = await import("../services/trackChanges.js");
+      const cached = await findCachedTrackChangesPdf(req.params.id, from, to);
+      if (!cached) {
+        res.status(404).json({ error: "Track-changes PDF not generated yet" });
+        return;
+      }
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Cache-Control", "no-store");
+      fs.createReadStream(cached.pdf).pipe(res);
+      return;
+    }
+
     const at = typeof req.query.at === "string" ? req.query.at.trim() : undefined;
     let root: string;
     let cfg = await readProjectConfig(req.params.id);

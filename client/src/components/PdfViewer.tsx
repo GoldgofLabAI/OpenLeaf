@@ -46,6 +46,13 @@ export type PdfDiffHighlightControls = {
   warning?: string | null;
   onEnabledChange: (on: boolean) => void;
   onPickBaseline: () => void;
+  /** Experimental: show the latexdiff PDF in the preview instead of SyncTeX overlays. */
+  markupPdf?: {
+    enabled: boolean;
+    available: boolean;
+    loading: boolean;
+    onEnabledChange: (on: boolean) => void;
+  };
 };
 
 type Props = {
@@ -599,11 +606,31 @@ export function PdfViewer({
                         : "Pick a leaf…")}
                   </span>
                 </button>
+                {diffHighlight.markupPdf?.available && (
+                  <button
+                    type="button"
+                    className={`btn btn-ghost${diffHighlight.markupPdf.enabled ? " pdf-diff-markup-on" : ""}`}
+                    aria-pressed={diffHighlight.markupPdf.enabled}
+                    title="Experimental: replace the preview with a latexdiff track-changes PDF of the compare baseline vs this checkpoint. Uncommitted editor edits are not included."
+                    onClick={() =>
+                      diffHighlight.markupPdf?.onEnabledChange(!diffHighlight.markupPdf.enabled)
+                    }
+                  >
+                    {diffHighlight.markupPdf.loading
+                      ? "Building markup PDF…"
+                      : diffHighlight.markupPdf.enabled
+                        ? "Markup PDF on"
+                        : "Markup PDF"}
+                    <span className="pdf-diff-exp">exp</span>
+                  </button>
+                )}
                 <span
                   className="status-pill pdf-diff-stat"
                   title={
                     diffHighlight.warning ??
-                    "Editor: +/− line decorations. PDF: SyncTeX boxes for added .tex lines on the live tip."
+                    (diffHighlight.markupPdf?.enabled
+                      ? "Preview is the latexdiff track-changes PDF (committed checkpoints only)."
+                      : "Editor: +/− line decorations. PDF: SyncTeX boxes for added .tex lines on the live tip.")
                   }
                 >
                   {diffHighlight.loading

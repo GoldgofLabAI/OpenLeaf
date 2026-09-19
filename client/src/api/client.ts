@@ -421,6 +421,13 @@ export function pdfUrl(id: string, bust?: number, branchId?: string, at?: string
   return `/api/projects/${encodeURIComponent(id)}/pdf${q}`;
 }
 
+/** Inline (non-attachment) latexdiff PDF for the preview pane. Generate first. */
+export function trackChangesPdfUrl(id: string, from: string, to: string, bust?: number): string {
+  const params = new URLSearchParams({ mode: "track-changes", from, to });
+  if (bust != null) params.set("t", String(bust));
+  return `/api/projects/${encodeURIComponent(id)}/pdf?${params}`;
+}
+
 export function downloadUrl(id: string, format: "pdf" | "zip", branchId?: string, at?: string | null): string {
   const params = new URLSearchParams({ format });
   if (at) params.set("at", at);

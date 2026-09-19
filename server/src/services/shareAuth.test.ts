@@ -128,11 +128,11 @@ describe("guestRouteDenial", () => {
     assert.equal(denial?.status, 403);
   });
 
-  it("gates track-changes on compile and download", () => {
+  it("gates track-changes generation on compile (preview does not need download)", () => {
     assert.equal(guestRouteDenial(req(`${prefix}/track-changes`, "POST"), s), null);
     const noCompile = session({ allowCompile: false });
     assert.equal(guestRouteDenial(req(`${prefix}/track-changes`, "POST"), noCompile)?.status, 403);
     const noDownload = session({ allowDownload: false });
-    assert.equal(guestRouteDenial(req(`${prefix}/track-changes`, "POST"), noDownload)?.status, 403);
+    assert.equal(guestRouteDenial(req(`${prefix}/track-changes`, "POST"), noDownload), null);
   });
 });
