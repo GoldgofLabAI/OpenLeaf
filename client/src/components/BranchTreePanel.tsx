@@ -36,6 +36,10 @@ type Props = {
   onHighlightSince?: (gitHash: string) => void;
   /** Fired after a leaf is successfully opened (checkout / observe). */
   onOpenNode?: (node: TimelineNode, branch: TimelineBranch) => void;
+  /** Fired as soon as the user picks a leaf, before checkout finishes — drop the previous PDF. */
+  onNavigateStart?: () => void;
+  /** Fired if that pick never completes, so the current leaf can show a PDF again. */
+  onNavigateAbort?: () => void;
 };
 
 export function BranchTreePanel({
@@ -53,6 +57,8 @@ export function BranchTreePanel({
   leavesVersion = 0,
   onHighlightSince,
   onOpenNode,
+  onNavigateStart,
+  onNavigateAbort,
 }: Props) {
   const [view, setView] = useState<TimelineView | null>(null);
   const [leafStats, setLeafStats] = useState<BranchLeafStat[]>([]);
@@ -191,11 +197,13 @@ export function BranchTreePanel({
     setBusy(true);
     setError(null);
     setPinnedId(node.id);
+    onNavigateStart?.();
     try {
       const isTip = branch.headNodeId === node.id;
       if (guestBranchId) {
         if (!isTip) {
           setError("Share-link guests can open live tips only — ask the host to travel history");
+          onNavigateAbort?.();
           return;
         }
         const next = await getProjectTimeline(projectId, branch.id);
@@ -204,7 +212,10 @@ export function BranchTreePanel({
         onOpenNode?.(node, branch);
         return;
       }
-      if (!canCheckout) return;
+      if (!canCheckout) {
+        onNavigateAbort?.();
+        return;
+      }
       const next = await checkoutProjectTimeline(projectId, {
         branchId: branch.id,
         nodeId: isTip ? null : node.id,
@@ -214,6 +225,7 @@ export function BranchTreePanel({
       onOpenNode?.(node, branch);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not open that leaf");
+      onNavigateAbort?.();
     } finally {
       setBusy(false);
     }

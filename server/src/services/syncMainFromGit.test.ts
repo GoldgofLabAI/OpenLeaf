@@ -234,6 +234,17 @@ describe("syncMainFromGit", () => {
     assert.ok(!after.branches.some((b) => b.importedGit && b.gitRef === forked.branch.gitRef));
   });
 
+  it("keeps an imported thread after it is merged into main", async () => {
+    await git(dir, ["checkout", "main"]);
+    await git(dir, ["merge", "fair-viewport-benchmark", "-m", "merge feature", "--no-gpg-sign", "--no-ff"]);
+    const tl = await loadTimeline(id);
+    const imported = tl.branches.find((b) => b.gitRef === "fair-viewport-benchmark");
+    assert.ok(imported, "merged git branch should remain explorable");
+    const nodes = tl.nodes.filter((n) => n.branchId === imported!.id);
+    assert.ok(nodes.length >= 1);
+    assert.equal(imported!.headNodeId, nodes[nodes.length - 1]!.id);
+  });
+
   it("delete-forever of an imported thread does not delete the git branch", async () => {
     const { pruneBranchTip, deletePrunedBranchForever } = await import("./timeline.js");
     const tl = await loadTimeline(id);

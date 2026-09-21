@@ -132,7 +132,9 @@ async function runGit(
 async function saveTimeline(projectId: string, state: TimelineState): Promise<void> {
   const dest = timelinePath(projectId);
   await fs.mkdir(path.dirname(dest), { recursive: true });
-  await fs.writeFile(dest, JSON.stringify(state, null, 2) + "\n", "utf8");
+  const tmp = `${dest}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(state, null, 2) + "\n", "utf8");
+  await fs.rename(tmp, dest);
 }
 
 function emptyMain(): TimelineState {
@@ -305,12 +307,17 @@ async function syncImportedGitBranches(
     if (branch?.prunedAt) continue;
 
     const base = (await mergeBase(projectId, "main", gb.name)) ?? "";
-    const unique = base
+    let unique = base
       ? await listProjectCommitsAfter(projectId, base, gb.name, 200)
       : [];
     if (unique.length === 0) {
-      // Fully merged into main (or behind) — nothing extra to explore.
-      continue;
+      // Fully merged (or git could not list unique commits). Keep an existing
+      // thread as-is so a live worktree remains explorable; otherwise add a
+      // single node at the branch tip.
+      if (branch && next.nodes.some((n) => n.branchId === branch.id)) continue;
+      const tip = (await listProjectCommits(projectId, 1, gb.name))[0];
+      if (!tip) continue;
+      unique = [tip];
     }
 
     if (!branch) {
