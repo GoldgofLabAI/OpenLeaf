@@ -36,6 +36,9 @@ OpenLeaf is for trusted local or LAN use. There is no authentication—by design
 - **TeX Live** with at least `pdflatex` and `bibtex` (`latexmk` recommended)
   - Ubuntu/Debian: `sudo apt install texlive-latex-recommended texlive-bibtex-extra latexmk`
   - macOS: [MacTeX](https://www.tug.org/mactex/) or `brew install --cask mactex-no-gui`
+- **latexdiff** (optional; required for **Download track-changes PDF** and the experimental **Markup PDF** preview)
+  - Ubuntu/Debian: `sudo apt install latexdiff` (this is a separate package from `texlive-extra-utils`)
+  - macOS: included with MacTeX; otherwise `brew install latexdiff`
 - **Git** (used for per-project version history; optional if you set `"git": { "enabled": false }`)
 
 ## Install and run
@@ -89,6 +92,8 @@ Then open [http://127.0.0.1:8787](http://127.0.0.1:8787) (API serves the built U
 | **Save & sync** | Flush live collab edits to disk and commit a backup |
 | **Recompile** | Run the TeX engine |
 | **PDF** / **ZIP** | Download outputs |
+| **Download track-changes PDF** | `latexdiff` PDF of the compare baseline vs this checkpoint (needs `latexdiff` on the host) |
+| **Markup PDF** (experimental) | Same `latexdiff` PDF in the preview pane, instead of SyncTeX addition boxes |
 
 ### Collaboration
 
@@ -102,6 +107,10 @@ Then open [http://127.0.0.1:8787](http://127.0.0.1:8787) (API serves the built U
 Each project gets its own git repo under `projects/<id>/` (ignored by the OpenLeaf repo’s `.gitignore`). Explicit saves and file-tree mutations auto-commit; background collab flushes do not. Use **History** in the UI to browse and restore. Disable with `"git": { "enabled": false }` in config.
 
 **Highlight additions** (PDF toolbar) diffs manuscript `.tex` files against a chosen snapshot and paints those added lines on the preview via SyncTeX — the same yellow you’d get from `\hl{...}`, without wrapping source. Toggle off for a clean view; the downloaded PDF is unchanged. Pick a baseline from the dropdown or **Highlight since** in History. `misc/` notes are ignored. Recompile after edits so SyncTeX boxes match the current PDF.
+
+**Markup PDF** (experimental toggle, shown when Differences is on) replaces that overlay with the same `latexdiff` track-changes PDF you can download. Uncommitted editor edits are not included. Click-to-source still uses the live (or checkpoint) SyncTeX map, so jumps stay on the raw project files; they can be a little off if markup changed pagination.
+
+**Download track-changes PDF** (overflow menu) runs `latexdiff` on the compare baseline vs this checkpoint and compiles a marked-up PDF. Uncommitted editor edits are not included. The host must have `latexdiff` installed.
 
 ## Project layout
 
@@ -154,7 +163,7 @@ Then open `http://127.0.0.1:5176`.
 - Realtime multi-user editing (Yjs) with preset identities
 - Per-project git backups, History UI, and PDF overlays for manuscript lines added since a snapshot
 - Light / dark theme
-- Download PDF or project ZIP (excludes `.openleaf/`)
+- Download PDF or project ZIP (excludes `.openleaf/`); optional track-changes PDF via `latexdiff`
 - Temporary public links per project (Cloudflare Quick Tunnel + one-off credentials), see below
 
 ## Sharing a project publicly

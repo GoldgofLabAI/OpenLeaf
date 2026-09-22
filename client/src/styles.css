@@ -2741,6 +2741,26 @@ a {
   border-color: rgba(201, 162, 39, 0.45) !important;
 }
 
+.pdf-diff-markup-on {
+  background: color-mix(in srgb, #3b82f6 18%, var(--bg-elevated)) !important;
+  color: #1e40af;
+  border-color: color-mix(in srgb, #3b82f6 42%, var(--border)) !important;
+}
+
+[data-scheme="dark"] .pdf-diff-markup-on {
+  color: #bfdbfe;
+  background: color-mix(in srgb, #3b82f6 22%, transparent) !important;
+}
+
+.pdf-diff-exp {
+  margin-left: 0.3rem;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.72;
+}
+
 [data-scheme="dark"] .pdf-diff-toggle-on {
   color: #ffe9a3;
   background: rgba(255, 245, 153, 0.14) !important;

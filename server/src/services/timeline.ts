@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import {
   autoCommitProject,
@@ -146,36 +146,97 @@ function emptyMain(): TimelineState {
   };
 }
 
-/** Import linear git history onto main as legacy nodes (once). */
-async function migrateFromGit(projectId: string, state: TimelineState): Promise<TimelineState> {
-  if (state.nodes.length > 0) return state;
-  if (!isGitEnabled()) return state;
+/** Reconcile main-branch timeline nodes with git log on main (by gitHash). */
+async function syncMainFromGit(
+  projectId: string,
+  state: TimelineState,
+): Promise<{ state: TimelineState; changed: boolean }> {
+  if (!isGitEnabled()) return { state, changed: false };
 
   await ensureProjectGit(projectId);
-  const commits = await listProjectCommits(projectId, 200);
-  if (commits.length === 0) return state;
+  const main = state.branches.find((b) => b.id === "main");
+  if (!main) return { state, changed: false };
+
+  const ref = main.gitRef?.trim() || "main";
+  const commits = await listProjectCommits(projectId, 200, ref);
+  if (commits.length === 0) return { state, changed: false };
 
   // listProjectCommits is newest-first; build oldest → newest chain
   const chrono = [...commits].reverse();
-  let parentId: string | null = null;
-  const nodes: TimelineNode[] = [];
-  for (const c of chrono) {
-    const id = `legacy-${c.shortHash}`;
-    nodes.push({
-      id,
-      branchId: "main",
-      parentId,
-      gitHash: c.hash,
-      message: c.message,
-      author: c.author,
-      createdAt: c.date,
-      legacy: true,
-    });
-    parentId = id;
+  const existingMain = state.nodes.filter((n) => n.branchId === "main");
+  const byHash = new Map<string, TimelineNode>();
+  for (const n of existingMain) {
+    if (!n.gitHash) continue;
+    byHash.set(n.gitHash, n);
+    if (n.gitHash.length >= 7) byHash.set(n.gitHash.slice(0, 7), n);
   }
-  const main = state.branches.find((b) => b.id === "main")!;
-  main.headNodeId = parentId;
-  return { ...state, nodes, branches: state.branches.map((b) => (b.id === "main" ? main : b)) };
+
+  let parentId: string | null = null;
+  const mainNodes: TimelineNode[] = [];
+  for (const c of chrono) {
+    const prev =
+      byHash.get(c.hash) ?? (c.shortHash ? byHash.get(c.shortHash) : undefined);
+    const node: TimelineNode = prev
+      ? {
+          ...prev,
+          branchId: "main",
+          parentId,
+          gitHash: c.hash,
+          message: c.message,
+          author: c.author,
+          createdAt: c.date,
+        }
+      : {
+          id: `legacy-${c.shortHash}`,
+          branchId: "main",
+          parentId,
+          gitHash: c.hash,
+          message: c.message,
+          author: c.author,
+          createdAt: c.date,
+          legacy: true,
+        };
+    mainNodes.push(node);
+    parentId = node.id;
+  }
+
+  const nonMainNodes = state.nodes.filter((n) => n.branchId !== "main");
+  const nextNodes = [...nonMainNodes, ...mainNodes];
+  const nextMain = { ...main, headNodeId: parentId };
+
+  let viewingNodeId = state.viewingNodeId;
+  if (viewingNodeId && !nextNodes.some((n) => n.id === viewingNodeId)) {
+    viewingNodeId = null;
+  }
+
+  const next: TimelineState = {
+    ...state,
+    viewingNodeId,
+    nodes: nextNodes,
+    branches: state.branches.map((b) => (b.id === "main" ? nextMain : b)),
+  };
+
+  const sig = (nodes: TimelineNode[], head: string | null, viewing: string | null) =>
+    JSON.stringify({
+      head,
+      viewing,
+      chain: nodes.map((n) => ({
+        id: n.id,
+        parentId: n.parentId,
+        gitHash: n.gitHash,
+        message: n.message,
+        author: n.author,
+        createdAt: n.createdAt,
+        mergeParentId: n.mergeParentId ?? null,
+        legacy: Boolean(n.legacy),
+      })),
+    });
+
+  const changed =
+    sig(mainNodes, nextMain.headNodeId, viewingNodeId) !==
+    sig(existingMain, main.headNodeId, state.viewingNodeId);
+
+  return { state: next, changed };
 }
 
 export async function loadTimeline(projectId: string): Promise<TimelineState> {
@@ -199,7 +260,11 @@ export async function loadTimeline(projectId: string): Promise<TimelineState> {
     }
   } else {
     state = emptyMain();
-    state = await migrateFromGit(projectId, state);
+  }
+
+  const synced = await syncMainFromGit(projectId, state);
+  state = synced.state;
+  if (synced.changed || !fsSync.existsSync(dest)) {
     await saveTimeline(projectId, state);
   }
   return state;
@@ -1011,6 +1076,84 @@ export async function readFileAtCommit(
     size: buf.length,
     text: false,
   };
+}
+
+/**
+ * Materialize an immutable commit tree under `.openleaf/snapshots/<fullHash>/`
+ * for compiling / serving PDFs without touching the branch tip worktree.
+ */
+export async function ensureSnapshotRoot(projectId: string, hash: string): Promise<string> {
+  await ensureProjectGit(projectId);
+  const h = assertCommitHash(hash);
+  const rev = await runGit(projectId, ["rev-parse", "--verify", h], { allowFailure: true });
+  if (rev.code !== 0 || !rev.stdout.trim()) throw err(404, "Commit not found");
+  const full = rev.stdout.trim();
+  if (!/^[0-9a-f]{40}$/i.test(full)) throw err(404, "Commit not found");
+
+  const dest = path.join(projectDir(projectId), ".openleaf", "snapshots", full);
+  const marker = path.join(dest, ".openleaf-snapshot-ok");
+  if (fsSync.existsSync(marker)) return dest;
+
+  await fs.rm(dest, { recursive: true, force: true });
+  await fs.mkdir(dest, { recursive: true });
+
+  await new Promise<void>((resolve, reject) => {
+    const archive = spawn("git", ["archive", "--format=tar", full], {
+      cwd: projectDir(projectId),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const tar = spawn("tar", ["-x", "-C", dest], {
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    let errBuf = "";
+    archive.stderr.on("data", (b: Buffer) => {
+      errBuf += b.toString("utf8");
+    });
+    tar.stderr.on("data", (b: Buffer) => {
+      errBuf += b.toString("utf8");
+    });
+    archive.on("error", reject);
+    tar.on("error", reject);
+    archive.stdout.pipe(tar.stdin);
+    let archiveFailed = false;
+    archive.on("close", (code) => {
+      if (code !== 0) {
+        archiveFailed = true;
+        tar.kill("SIGKILL");
+        reject(err(500, errBuf.trim() || `git archive failed for ${full.slice(0, 7)}`));
+      }
+    });
+    tar.on("close", (code) => {
+      if (archiveFailed) return;
+      if (code === 0) resolve();
+      else reject(err(500, errBuf.trim() || `Failed to extract checkpoint ${full.slice(0, 7)}`));
+    });
+  });
+
+  await fs.writeFile(marker, `${full}\n`, "utf8");
+  return dest;
+}
+
+/** Snapshot root if already extracted; null when the checkpoint has never been materialized. */
+export function snapshotRootIfPresent(projectId: string, hash: string): string | null {
+  if (!HASH_RE.test(hash)) return null;
+  const root = projectDir(projectId);
+  // Prefer full-hash folder; also accept prefix match under snapshots/.
+  const base = path.join(root, ".openleaf", "snapshots");
+  if (!fsSync.existsSync(base)) return null;
+  const exact = path.join(base, hash);
+  if (fsSync.existsSync(path.join(exact, ".openleaf-snapshot-ok"))) return exact;
+  try {
+    for (const name of fsSync.readdirSync(base)) {
+      if (name.startsWith(hash.toLowerCase()) || name.startsWith(hash)) {
+        const cand = path.join(base, name);
+        if (fsSync.existsSync(path.join(cand, ".openleaf-snapshot-ok"))) return cand;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 /** Seed a tip commit if the project has files but no nodes yet. */

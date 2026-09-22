@@ -1,5 +1,6 @@
 import { spawn, execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { loadConfig, type LatexEngine } from "../config.js";
@@ -21,12 +22,39 @@ export type CompileResult = {
   durationMs: number;
 };
 
+/** TeX installs (TinyTeX, MacTeX) often sit outside the PATH of GUI/IDE shells. */
+export function texEnv(): NodeJS.ProcessEnv {
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, "Library/TinyTeX/bin/universal-darwin"),
+    path.join(home, "Library/TinyTeX/bin/aarch64-darwin"),
+    path.join(home, "Library/TinyTeX/bin/x86_64-darwin"),
+    path.join(home, ".TinyTeX/bin/x86_64-linux"),
+    path.join(home, ".TinyTeX/bin/aarch64-linux"),
+    "/Library/TeX/texbin",
+    "/usr/local/texlive/2026/bin/universal-darwin",
+    "/usr/local/texlive/2025/bin/universal-darwin",
+    "/usr/local/texlive/2024/bin/universal-darwin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ];
+  const seen = new Set<string>();
+  const dirs: string[] = [];
+  for (const dir of [...candidates, ...(process.env.PATH ?? "").split(path.delimiter)]) {
+    if (!dir || seen.has(dir)) continue;
+    if (candidates.includes(dir) && !fs.existsSync(dir)) continue;
+    seen.add(dir);
+    dirs.push(dir);
+  }
+  return { ...process.env, PATH: dirs.join(path.delimiter) };
+}
+
 let latexmkAvailable: boolean | null = null;
 
 async function hasLatexmk(): Promise<boolean> {
   if (latexmkAvailable !== null) return latexmkAvailable;
   try {
-    await execFileAsync("latexmk", ["-v"], { timeout: 5000 });
+    await execFileAsync("latexmk", ["-v"], { timeout: 5000, env: texEnv() });
     latexmkAvailable = true;
   } catch {
     latexmkAvailable = false;
@@ -43,7 +71,7 @@ function runCommand(
   env?: NodeJS.ProcessEnv,
 ): Promise<{ code: number; log: string }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, env: env ?? process.env });
+    const child = spawn(cmd, args, { cwd, env: env ?? texEnv() });
     let log = "";
     const append = (buf: Buffer) => {
       const s = buf.toString("utf8");
@@ -122,7 +150,7 @@ async function compileFallback(
   if (fs.existsSync(aux)) {
     onChunk?.("\n[openleaf] bibtex\n");
     const bibEnv = {
-      ...process.env,
+      ...texEnv(),
       BIBINPUTS: `${cwd}${path.delimiter}${process.env.BIBINPUTS ?? ""}`,
       BSTINPUTS: `${cwd}${path.delimiter}${process.env.BSTINPUTS ?? ""}`,
     };
@@ -153,6 +181,15 @@ async function withProjectCompileLock<T>(id: string, fn: () => Promise<T>): Prom
   }
 }
 
+/** Compile an already-resolved tree (snapshot, worktree, or scratch). Does not take the live lock. */
+export async function compileProjectAtRoot(
+  id: string,
+  onChunk?: (chunk: string) => void,
+  rootDir?: string,
+): Promise<CompileResult> {
+  return compileProjectUnlocked(id, onChunk, rootDir);
+}
+
 async function compileProjectUnlocked(
   id: string,
   onChunk?: (chunk: string) => void,
@@ -160,9 +197,23 @@ async function compileProjectUnlocked(
 ): Promise<CompileResult> {
   const started = Date.now();
   const cfg = loadConfig();
-  const projectCfg = await readProjectConfig(id);
-  const engine = projectCfg.engine ?? cfg.latex.engine;
   const cwd = rootDir ?? projectDir(id);
+  // Prefer openleaf.json inside the compile root (snapshot or tip).
+  let projectCfg = await readProjectConfig(id);
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(cwd, "openleaf.json"), "utf8")) as {
+      mainFile?: string;
+      engine?: LatexEngine;
+    };
+    projectCfg = {
+      ...projectCfg,
+      mainFile: raw.mainFile ?? projectCfg.mainFile,
+      engine: raw.engine ?? projectCfg.engine,
+    };
+  } catch {
+    /* tip/snapshot may lack openleaf.json */
+  }
+  const engine = projectCfg.engine ?? cfg.latex.engine;
   const outRel = cfg.latex.outputDir;
   const outAbs = outputDirAbs(id, cwd);
   fs.mkdirSync(outAbs, { recursive: true });
@@ -203,15 +254,23 @@ async function compileProjectUnlocked(
 export async function compileProject(
   id: string,
   onChunk?: (chunk: string) => void,
-  opts?: { branchId?: string },
+  opts?: { branchId?: string; at?: string },
 ): Promise<CompileResult> {
   return withProjectCompileLock(id, async () => {
     const { flushProjectRoom } = await import("./collab/room.js");
-    const { ensureBranchRoot } = await import("./timeline.js");
+    const { ensureBranchRoot, ensureSnapshotRoot } = await import("./timeline.js");
+
+    const at = opts?.at?.trim();
+    if (at) {
+      onChunk?.(`[openleaf] compiling checkpoint ${at.slice(0, 7)} (read-only snapshot)\n`);
+      const root = await ensureSnapshotRoot(id, at);
+      return compileProjectAtRoot(id, onChunk, root);
+    }
+
     const branchId = opts?.branchId ?? "main";
     onChunk?.(`[openleaf] flushing collaborative edits to disk (${branchId})\n`);
     await flushProjectRoom(id, { commit: false, branchId });
     const root = await ensureBranchRoot(id, branchId);
-    return compileProjectUnlocked(id, onChunk, root);
+    return compileProjectAtRoot(id, onChunk, root);
   });
 }

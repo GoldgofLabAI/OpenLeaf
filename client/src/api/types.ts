@@ -62,6 +62,14 @@ export type CompileResult = {
   durationMs: number;
 };
 
+export type TrackChangesResult = CompileResult & {
+  from: GitCommitInfo;
+  to: GitCommitInfo;
+  cached: boolean;
+  expandedMacros: string[];
+  scratchRelative: string;
+};
+
 export type SynctexHit = {
   input: string;
   line: number;

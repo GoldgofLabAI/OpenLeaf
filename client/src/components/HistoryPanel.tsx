@@ -94,7 +94,8 @@ export function HistoryPanel({
         {canRestore
           ? "Restore copies that revision into the working tree."
           : "Only the host can restore a snapshot."}{" "}
-        Highlight additions maps new .tex lines since a snapshot onto the PDF (preview overlay).
+        Highlight additions maps new .tex lines since a snapshot onto the PDF (preview overlay).{" "}
+        Markup PDF (experimental) shows the latexdiff track-changes PDF instead.
       </p>
       {error && <div className="error-banner">{error}</div>}
       {loading && commits.length === 0 ? (

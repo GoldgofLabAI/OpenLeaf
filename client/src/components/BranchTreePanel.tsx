@@ -441,13 +441,11 @@ export function BranchTreePanel({
       pickMergeTip(branch);
       return;
     }
-    if (pinnedId === node.id) {
-      void selectNode(node, branch);
-      return;
-    }
-    setPinnedId(node.id);
+    // Single click opens the leaf (historical checkpoint or tip). Pinning alone
+    // looked like a dead graph — users expect travel on the first tap.
     setHoveredId(node.id);
     setLeafMoreOpen(false);
+    void selectNode(node, branch);
   };
 
   if (!open) return null;

@@ -5,6 +5,24 @@ import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 
+// Reuse one worker for the lifetime of the tab. PDF.js otherwise creates and
+// destroys a worker for every document URL; switching projects/checkpoints then
+// repeatedly reloads and recompiles the worker bundle, and Chromium keeps much
+// of that native high-water allocation even after each worker is terminated.
+let sharedPdfWorker: pdfjs.PDFWorker | null = null;
+
+function getPdfWorker(): pdfjs.PDFWorker {
+  if (!sharedPdfWorker) sharedPdfWorker = new pdfjs.PDFWorker();
+  return sharedPdfWorker;
+}
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    sharedPdfWorker?.destroy();
+    sharedPdfWorker = null;
+  });
+}
+
 const MIN_SCALE = 0.6;
 const MAX_SCALE = 2.4;
 const SCALE_STEP = 0.1;
@@ -46,6 +64,13 @@ export type PdfDiffHighlightControls = {
   warning?: string | null;
   onEnabledChange: (on: boolean) => void;
   onPickBaseline: () => void;
+  /** Experimental: show the latexdiff PDF in the preview instead of SyncTeX overlays. */
+  markupPdf?: {
+    enabled: boolean;
+    available: boolean;
+    loading: boolean;
+    onEnabledChange: (on: boolean) => void;
+  };
 };
 
 type Props = {
@@ -109,6 +134,15 @@ function releaseCanvas(canvas: HTMLCanvasElement): void {
   canvas.height = 0;
 }
 
+/** Tear down painted canvases so GPU/backing-store memory is released promptly. */
+function clearPdfDom(container: HTMLElement | null): void {
+  if (!container) return;
+  container.querySelectorAll("canvas").forEach((node) => {
+    releaseCanvas(node as HTMLCanvasElement);
+  });
+  container.innerHTML = "";
+}
+
 export function PdfViewer({
   url,
   emptyHint,
@@ -143,6 +177,16 @@ export function PdfViewer({
 
   scaleRef.current = scale;
 
+  /** Drop the resident PDF immediately — only one document should stay in memory. */
+  const dropResidentDoc = () => {
+    paintTokenRef.current += 1;
+    const prev = docRef.current;
+    docRef.current = null;
+    pageSizesRef.current = [];
+    clearPdfDom(containerRef.current);
+    prev?.destroy().catch(() => undefined);
+  };
+
   useEffect(() => {
     if (!fullscreen) return;
     const onKey = (ev: KeyboardEvent) => {
@@ -164,49 +208,51 @@ export function PdfViewer({
 
   // Load / replace the PDF document only when the URL changes.
   useEffect(() => {
+    // Always release the previous PDF before starting a new load (or clearing).
+    dropResidentDoc();
+    setPageCount(0);
+    setPagesReady(false);
+
     if (!url) {
-      paintTokenRef.current += 1;
-      docRef.current?.destroy().catch(() => undefined);
-      docRef.current = null;
-      pageSizesRef.current = [];
-      setPageCount(0);
-      setPagesReady(false);
       setLoading(false);
       setError(null);
-      if (containerRef.current) containerRef.current.innerHTML = "";
       return;
     }
 
     let cancelled = false;
-    let transferred = false;
-    const loadingTask = pdfjs.getDocument(url);
+    let settledDoc: PDFDocumentProxy | null = null;
+    const loadingTask = pdfjs.getDocument({ url, worker: getPdfWorker() });
     setLoading(true);
     setError(null);
 
     (async () => {
       try {
         const doc = await loadingTask.promise;
+        settledDoc = doc;
         if (cancelled) {
+          settledDoc = null;
           await doc.destroy().catch(() => undefined);
           return;
         }
         const sizes: Array<{ width: number; height: number }> = [];
         for (let i = 1; i <= doc.numPages; i += 1) {
           const page = await doc.getPage(i);
-          const viewport = page.getViewport({ scale: 1 });
-          sizes.push({ width: viewport.width, height: viewport.height });
+          try {
+            const viewport = page.getViewport({ scale: 1 });
+            sizes.push({ width: viewport.width, height: viewport.height });
+          } finally {
+            page.cleanup();
+          }
         }
         if (cancelled) {
+          settledDoc = null;
           await doc.destroy().catch(() => undefined);
           return;
         }
         paintTokenRef.current += 1;
-        const prev = docRef.current;
         docRef.current = doc;
-        transferred = true;
+        settledDoc = null; // ownership moved to docRef
         pageSizesRef.current = sizes;
-        prev?.destroy().catch(() => undefined);
-        if (containerRef.current) containerRef.current.innerHTML = "";
         renderedScaleRef.current = scaleRef.current;
         setPagesReady(false);
         setPageCount(doc.numPages);
@@ -230,17 +276,26 @@ export function PdfViewer({
     return () => {
       cancelled = true;
       paintTokenRef.current += 1;
-      if (!transferred) {
-        void Promise.resolve(loadingTask.destroy()).catch(() => undefined);
+      void Promise.resolve(loadingTask.destroy()).catch(() => undefined);
+      // If load finished but we never handed off (or handed off then URL changed),
+      // destroy whatever this effect still owns.
+      if (settledDoc) {
+        settledDoc.destroy().catch(() => undefined);
+        settledDoc = null;
+      }
+      if (docRef.current) {
+        const owned = docRef.current;
+        docRef.current = null;
+        pageSizesRef.current = [];
+        clearPdfDom(containerRef.current);
+        owned.destroy().catch(() => undefined);
       }
     };
   }, [url]);
 
   useEffect(() => {
     return () => {
-      paintTokenRef.current += 1;
-      docRef.current?.destroy().catch(() => undefined);
-      docRef.current = null;
+      dropResidentDoc();
     };
   }, []);
 
@@ -249,7 +304,7 @@ export function PdfViewer({
     const doc = docRef.current;
     const container = containerRef.current;
     const scroller = scrollRef.current;
-    if (!doc || !container || pageCount === 0) return;
+    if (!doc || !container || !scroller || pageCount === 0) return;
 
     let cancelled = false;
     const token = ++paintTokenRef.current;
@@ -259,6 +314,7 @@ export function PdfViewer({
     const inflight = new Map<number, { cancel: () => void }>();
     const painting = new Set<number>();
     const visible = new Set<number>();
+    let visibilityFrame: number | null = null;
 
     const ensureWrap = (pageNum: number, width: number, height: number): HTMLElement => {
       let wrap = container.querySelector(
@@ -329,6 +385,16 @@ export function PdfViewer({
       wrap?.classList.add("is-placeholder");
     };
 
+    const hasRenderableViewport = () => {
+      const rect = scroller.getBoundingClientRect();
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        scroller.clientWidth > 0 &&
+        scroller.clientHeight > 0
+      );
+    };
+
     const isCancelledRender = (err: unknown): boolean => {
       if (cancelled || token !== paintTokenRef.current) return true;
       const name = err && typeof err === "object" && "name" in err ? String(err.name) : "";
@@ -342,6 +408,11 @@ export function PdfViewer({
 
     const paint = async (pageNum: number) => {
       if (cancelled || token !== paintTokenRef.current) return;
+      if (!hasRenderableViewport()) {
+        visible.delete(pageNum);
+        releasePageCanvas(pageNum);
+        return;
+      }
       if (painting.has(pageNum)) return;
       painting.add(pageNum);
       const wrap = container.querySelector(
@@ -352,9 +423,19 @@ export function PdfViewer({
         painting.delete(pageNum);
         return;
       }
+      let page: Awaited<ReturnType<PDFDocumentProxy["getPage"]>> | null = null;
+      let rendered = false;
+      let retryVisible = false;
       try {
-        const page = await doc.getPage(pageNum);
-        if (cancelled || token !== paintTokenRef.current || !visible.has(pageNum)) return;
+        page = await doc.getPage(pageNum);
+        if (
+          cancelled ||
+          token !== paintTokenRef.current ||
+          !visible.has(pageNum) ||
+          !hasRenderableViewport()
+        ) {
+          return;
+        }
         const viewport = page.getViewport({ scale: renderScale });
         wrap.style.width = `${viewport.width}px`;
         wrap.style.height = `${viewport.height}px`;
@@ -372,15 +453,80 @@ export function PdfViewer({
           return;
         }
         wrap.classList.remove("is-placeholder");
+        rendered = true;
       } catch (err) {
-        if (isCancelledRender(err)) return;
+        if (isCancelledRender(err)) {
+          retryVisible =
+            !cancelled &&
+            token === paintTokenRef.current &&
+            visible.has(pageNum);
+          return;
+        }
         if (!cancelled && token === paintTokenRef.current) {
           setError(err instanceof Error ? err.message : "Failed to render PDF page");
         }
       } finally {
         inflight.delete(pageNum);
         painting.delete(pageNum);
+        if (!rendered) releasePageCanvas(pageNum);
+        page?.cleanup();
+        // A page can leave and re-enter while its cancelled render settles.
+        // The visibility callback cannot restart it while `painting` is set.
+        if (retryVisible) queueMicrotask(() => void paint(pageNum));
       }
+    };
+
+    const hidePage = (pageNum: number) => {
+      visible.delete(pageNum);
+      inflight.get(pageNum)?.cancel();
+      if (!painting.has(pageNum)) releasePageCanvas(pageNum);
+    };
+
+    const refreshVisiblePages = () => {
+      if (cancelled || token !== paintTokenRef.current) return;
+      const rootRect = scroller.getBoundingClientRect();
+
+      // A narrow-layout pane uses display:none. All of its page rectangles are
+      // then zeroes, which used to make the fallback below classify every page
+      // as visible and render the whole PDF into hidden canvases.
+      if (
+        rootRect.width <= 0 ||
+        rootRect.height <= 0 ||
+        scroller.clientWidth <= 0 ||
+        scroller.clientHeight <= 0
+      ) {
+        for (const wrap of [...container.querySelectorAll(".pdf-page-wrap")] as HTMLElement[]) {
+          const pageNum = Number(wrap.dataset.page);
+          if (pageNum) hidePage(pageNum);
+        }
+        return;
+      }
+
+      const margin = Math.max(rootRect.height, 1) * 1.4;
+      for (const wrap of [...container.querySelectorAll(".pdf-page-wrap")] as HTMLElement[]) {
+        const rect = wrap.getBoundingClientRect();
+        const pageNum = Number(wrap.dataset.page);
+        if (!pageNum) continue;
+        const near =
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.bottom >= rootRect.top - margin &&
+          rect.top <= rootRect.bottom + margin;
+        if (near) {
+          visible.add(pageNum);
+          void paint(pageNum);
+        } else {
+          hidePage(pageNum);
+        }
+      }
+    };
+
+    const scheduleVisibilityRefresh = () => {
+      if (visibilityFrame != null) return;
+      visibilityFrame = window.requestAnimationFrame(() => {
+        visibilityFrame = null;
+        refreshVisiblePages();
+      });
     };
 
     const observer = new IntersectionObserver(
@@ -392,9 +538,7 @@ export function PdfViewer({
             visible.add(pageNum);
             void paint(pageNum);
           } else {
-            visible.delete(pageNum);
-            inflight.get(pageNum)?.cancel();
-            if (!painting.has(pageNum)) releasePageCanvas(pageNum);
+            hidePage(pageNum);
           }
         }
       },
@@ -405,27 +549,24 @@ export function PdfViewer({
       observer.observe(wrap);
     }
 
-    const kick = window.requestAnimationFrame(() => {
-      if (cancelled || !scroller) return;
-      const rootRect = scroller.getBoundingClientRect();
-      const margin = Math.max(rootRect.height, 1) * 1.4;
-      for (const wrap of [...container.querySelectorAll(".pdf-page-wrap")] as HTMLElement[]) {
-        const rect = wrap.getBoundingClientRect();
-        const pageNum = Number(wrap.dataset.page);
-        if (!pageNum) continue;
-        if (rect.bottom >= rootRect.top - margin && rect.top <= rootRect.bottom + margin) {
-          visible.add(pageNum);
-          void paint(pageNum);
-        }
-      }
-    });
+    // ResizeObserver fires when mobile pane CSS hides/reveals the preview and
+    // when split-pane resizing changes the set of nearby pages.
+    const resizeObserver = new ResizeObserver(scheduleVisibilityRefresh);
+    resizeObserver.observe(scroller);
+    scheduleVisibilityRefresh();
 
     return () => {
       cancelled = true;
-      window.cancelAnimationFrame(kick);
+      if (visibilityFrame != null) window.cancelAnimationFrame(visibilityFrame);
+      resizeObserver.disconnect();
       observer.disconnect();
       for (const task of inflight.values()) task.cancel();
       inflight.clear();
+      // Release painted bitmaps when scale/doc changes; placeholders stay until
+      // the next layout pass rebuilds wraps.
+      container.querySelectorAll("canvas").forEach((node) => {
+        releaseCanvas(node as HTMLCanvasElement);
+      });
     };
   }, [docVersion, scale, pageCount]);
 
@@ -562,11 +703,31 @@ export function PdfViewer({
                         : "Pick a leaf…")}
                   </span>
                 </button>
+                {diffHighlight.markupPdf?.available && (
+                  <button
+                    type="button"
+                    className={`btn btn-ghost${diffHighlight.markupPdf.enabled ? " pdf-diff-markup-on" : ""}`}
+                    aria-pressed={diffHighlight.markupPdf.enabled}
+                    title="Experimental: replace the preview with a latexdiff track-changes PDF of the compare baseline vs this checkpoint. Uncommitted editor edits are not included."
+                    onClick={() =>
+                      diffHighlight.markupPdf?.onEnabledChange(!diffHighlight.markupPdf.enabled)
+                    }
+                  >
+                    {diffHighlight.markupPdf.loading
+                      ? "Building markup PDF…"
+                      : diffHighlight.markupPdf.enabled
+                        ? "Markup PDF on"
+                        : "Markup PDF"}
+                    <span className="pdf-diff-exp">exp</span>
+                  </button>
+                )}
                 <span
                   className="status-pill pdf-diff-stat"
                   title={
                     diffHighlight.warning ??
-                    "Editor: +/− line decorations. PDF: SyncTeX boxes for added .tex lines on the live tip."
+                    (diffHighlight.markupPdf?.enabled
+                      ? "Preview is the latexdiff track-changes PDF (committed checkpoints only)."
+                      : "Editor: +/− line decorations. PDF: SyncTeX boxes for added .tex lines on the live tip.")
                   }
                 >
                   {diffHighlight.loading

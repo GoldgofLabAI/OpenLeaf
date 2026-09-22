@@ -247,7 +247,11 @@ export function TimelineGraph({
     const ignoreTarget = (target: EventTarget | null) =>
       target instanceof Element &&
       Boolean(
-        target.closest(".tl-hover-dock, .share-pick-prompt, .tl-fork-modal, .tl-zoom-ctrl, input, textarea"),
+        target.closest(
+          // Orbs must not start a surface pan/capture — that steals the click
+          // and makes timeline leaves feel dead.
+          ".tl-orb, .tl-hover-dock, .share-pick-prompt, .tl-fork-modal, .tl-zoom-ctrl, input, textarea",
+        ),
       );
 
     const surfacePoint = (clientX: number, clientY: number) => {
@@ -592,6 +596,10 @@ export function TimelineGraph({
               onMouseLeave={onHoverIdChange ? clearHoverSoon : undefined}
               onFocus={onHoverIdChange ? () => keepHover(l.node.id) : undefined}
               onBlur={onHoverIdChange ? clearHoverSoon : undefined}
+              onPointerDown={(e) => {
+                // Keep the surface pan handler from capturing this gesture.
+                e.stopPropagation();
+              }}
               onClick={(e) => {
                 if (suppressClickRef.current) {
                   e.preventDefault();

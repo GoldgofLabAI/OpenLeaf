@@ -219,20 +219,26 @@ export async function autoCommitProject(
 export async function listProjectCommits(
   id: string,
   limit = 50,
+  ref?: string,
 ): Promise<GitCommitInfo[]> {
   if (!isGitEnabled()) return [];
   await ensureProjectGit(id);
 
   const n = Math.min(200, Math.max(1, limit));
-  const log = await runGit(
-    id,
-    [
-      "log",
-      `-n${n}`,
-      "--pretty=format:%H%x09%h%x09%an%x09%ae%x09%aI%x09%s",
-    ],
-    { allowFailure: true },
-  );
+  const args = [
+    "log",
+    `-n${n}`,
+    "--pretty=format:%H%x09%h%x09%an%x09%ae%x09%aI%x09%s",
+  ];
+  // Optional ref (e.g. "main") — reject path-like values to avoid treating them as pathspecs.
+  if (ref?.trim()) {
+    const r = ref.trim();
+    if (!/^[0-9a-zA-Z._/-]+$/.test(r) || r.includes("..")) {
+      return [];
+    }
+    args.push(r);
+  }
+  const log = await runGit(id, args, { allowFailure: true });
 
   if (log.code !== 0 || !log.stdout.trim()) return [];
 

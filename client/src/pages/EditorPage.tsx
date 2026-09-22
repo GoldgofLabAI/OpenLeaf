@@ -15,13 +15,16 @@ import {
   getProjectMerge,
   getProjectTimeline,
   getTree,
+  generateTrackChanges,
   listProjectComments,
   mkdirProjectPath,
   pdfUrl,
+  trackChangesPdfUrl,
   readProjectFile,
   renameProjectPath,
   synctexForward,
   synctexLookup,
+  trackChangesDownloadUrl,
   writeProjectFile,
   type MergeSession,
 } from "../api/client";
@@ -123,25 +126,42 @@ function persistDiffHighlight(
   enabled: boolean,
   since: string,
   label?: string,
+  trackChangesPdf?: boolean,
 ): void {
   localStorage.setItem(
     diffHighlightKey(projectId),
-    JSON.stringify({ enabled, since: since || null, label: label || null }),
+    JSON.stringify({
+      enabled,
+      since: since || null,
+      label: label || null,
+      trackChangesPdf: Boolean(trackChangesPdf),
+    }),
   );
 }
 
-function readDiffHighlightPref(projectId: string): { enabled: boolean; since: string; label: string } {
+function readDiffHighlightPref(projectId: string): {
+  enabled: boolean;
+  since: string;
+  label: string;
+  trackChangesPdf: boolean;
+} {
   try {
     const raw = localStorage.getItem(diffHighlightKey(projectId));
-    if (!raw) return { enabled: false, since: "", label: "" };
-    const pref = JSON.parse(raw) as { enabled?: boolean; since?: string | null; label?: string | null };
+    if (!raw) return { enabled: false, since: "", label: "", trackChangesPdf: false };
+    const pref = JSON.parse(raw) as {
+      enabled?: boolean;
+      since?: string | null;
+      label?: string | null;
+      trackChangesPdf?: boolean;
+    };
     return {
       enabled: Boolean(pref.enabled),
       since: typeof pref.since === "string" ? pref.since : "",
       label: typeof pref.label === "string" ? pref.label : "",
+      trackChangesPdf: Boolean(pref.trackChangesPdf),
     };
   } catch {
-    return { enabled: false, since: "", label: "" };
+    return { enabled: false, since: "", label: "", trackChangesPdf: false };
   }
 }
 
@@ -210,6 +230,8 @@ export function EditorPage() {
   branchIdRef.current = branchId;
   const [timelineCanEdit, setTimelineCanEdit] = useState(true);
   const [viewingGitHash, setViewingGitHash] = useState<string | null>(null);
+  const viewingGitHashRef = useRef(viewingGitHash);
+  viewingGitHashRef.current = viewingGitHash;
   const [branchLabel, setBranchLabel] = useState(guest?.share.branchName || "main");
   const [project, setProject] = useState<ProjectMeta | null>(null);
   const collab = useProjectCollab(project?.id === id ? id || undefined : undefined, guestIdentity, branchId);
@@ -340,6 +362,11 @@ export function EditorPage() {
   const [commentThreads, setCommentThreads] = useState<CommentThread[]>([]);
   const [focusCommentId, setFocusCommentId] = useState<string | null>(null);
   const [lastCommit, setLastCommit] = useState<string | null>(null);
+  const [tipGitHash, setTipGitHash] = useState<string | null>(null);
+  const [trackChangesBusy, setTrackChangesBusy] = useState(false);
+  const pendingTrackChangesRef = useRef(false);
+  const trackChangesBusyCount = useRef(0);
+  const trackChangesPreviewReqRef = useRef("");
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const [flushedContent, setFlushedContent] = useState("");
   const saveLock = useRef(false);
@@ -355,6 +382,13 @@ export function EditorPage() {
   const [diffChanges, setDiffChanges] = useState<FileChangeDiff[]>([]);
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffWarning, setDiffWarning] = useState<string | null>(null);
+  const [trackChangesPreviewOn, setTrackChangesPreviewOn] = useState(false);
+  const [trackChangesPreviewPair, setTrackChangesPreviewPair] = useState<{
+    from: string;
+    to: string;
+  } | null>(null);
+  const [trackChangesPreviewBust, setTrackChangesPreviewBust] = useState<number | null>(null);
+  const [trackChangesPreviewError, setTrackChangesPreviewError] = useState<string | null>(null);
   const compileLock = useRef(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const activePathRef = useRef(activePath);
@@ -573,12 +607,22 @@ export function EditorPage() {
       setDiffOn(false);
       setDiffSince("");
       setDiffBaselineLabel("");
+      setTrackChangesPreviewOn(false);
+      setTrackChangesPreviewPair(null);
+      setTrackChangesPreviewError(null);
+      setTrackChangesPreviewBust(null);
+      trackChangesPreviewReqRef.current = "";
       return;
     }
     const pref = readDiffHighlightPref(id);
     setDiffOn(pref.enabled);
     setDiffSince(pref.since);
     setDiffBaselineLabel(pref.label);
+    setTrackChangesPreviewOn(pref.trackChangesPdf);
+    setTrackChangesPreviewPair(null);
+    setTrackChangesPreviewError(null);
+    setTrackChangesPreviewBust(null);
+    trackChangesPreviewReqRef.current = "";
   }, [id]);
 
   useEffect(() => {
@@ -719,11 +763,20 @@ export function EditorPage() {
   const onDiffEnabledChange = useCallback(
     (on: boolean) => {
       setDiffOn(on);
-      if (id) persistDiffHighlight(id, on, diffSince, diffBaselineLabel);
+      if (id) persistDiffHighlight(id, on, diffSince, diffBaselineLabel, trackChangesPreviewOn);
       if (on && !diffSince) setComparePickerOpen(true);
       if (!on) setComparePickerOpen(false);
     },
-    [id, diffSince, diffBaselineLabel],
+    [id, diffSince, diffBaselineLabel, trackChangesPreviewOn],
+  );
+
+  const onTrackChangesPreviewChange = useCallback(
+    (on: boolean) => {
+      setTrackChangesPreviewOn(on);
+      if (id) persistDiffHighlight(id, diffOn, diffSince, diffBaselineLabel, on);
+      if (on && !diffSince) setComparePickerOpen(true);
+    },
+    [id, diffOn, diffSince, diffBaselineLabel],
   );
 
   const labels = useMemo(() => {
@@ -939,16 +992,21 @@ export function EditorPage() {
     if (!id || compileLock.current || !canCompile) return false;
     compileLock.current = true;
     const startedOn = branchIdRef.current;
-    const startedLabel = branchLabel;
+    const startedAt = viewingGitHashRef.current;
+    const stillHere = () =>
+      branchIdRef.current === startedOn && viewingGitHashRef.current === startedAt;
     setStatus("compiling");
+    const checkpointLabel = startedAt
+      ? `checkpoint ${startedAt.slice(0, 7)}`
+      : branchLabel;
     if (!opts?.auto) {
       setLog("");
       setLogOpen(true);
     } else {
       setLog((prev) =>
         prev
-          ? `${prev}\n\n[openleaf] Building PDF for “${startedLabel}”…\n`
-          : `[openleaf] Building PDF for “${startedLabel}”…\n`,
+          ? `${prev}\n\n[openleaf] Building PDF for “${checkpointLabel}”…\n`
+          : `[openleaf] Building PDF for “${checkpointLabel}”…\n`,
       );
     }
     try {
@@ -956,13 +1014,13 @@ export function EditorPage() {
         id,
         {
           onLog: (chunk) => {
-            if (branchIdRef.current !== startedOn) return;
+            if (!stillHere()) return;
             setLog((prev) => prev + chunk);
           },
         },
-        { branchId: startedOn },
+        startedAt ? { at: startedAt } : { branchId: startedOn },
       );
-      if (branchIdRef.current !== startedOn) return false;
+      if (!stillHere()) return false;
       setLog((prev) => prev || result.log);
       if (result.ok) {
         setStatus("ok");
@@ -974,14 +1032,14 @@ export function EditorPage() {
       if (opts?.auto) setLogOpen(true);
       return false;
     } catch (err) {
-      if (branchIdRef.current !== startedOn) return false;
+      if (!stillHere()) return false;
       setStatus("err");
       setLog((prev) => `${prev}\n${err instanceof Error ? err.message : "Compile failed"}`);
       if (opts?.auto) setLogOpen(true);
       return false;
     } finally {
       compileLock.current = false;
-      if (branchIdRef.current !== startedOn) {
+      if (!stillHere()) {
         void runCompileRef.current({ auto: true });
       }
     }
@@ -990,27 +1048,29 @@ export function EditorPage() {
   const runCompileRef = useRef(runCompile);
   runCompileRef.current = runCompile;
 
-  // Each branch tip has its own build artifacts. When you land on a tip with no PDF yet,
-  // compile automatically — don't leave a blank/error pane that requires knowing to hit Recompile.
+  // Each tip (and each historical checkpoint) has its own build artifacts. When you land
+  // on one with no PDF yet, compile automatically.
   useEffect(() => {
     if (!id || project?.id !== id) return;
     setPdfBust(null);
-    if (viewingGitHash) return; // historical leaf — no tip worktree PDF to ensure
     if (!canCompile) return;
 
     let cancelled = false;
     const branchAtStart = branchId;
+    const atAtStart = viewingGitHash;
     (async () => {
       try {
-        const probe = await fetch(pdfUrl(id, Date.now(), branchId), { method: "GET" });
-        if (cancelled || branchAtStart !== branchId) return;
+        const probe = await fetch(pdfUrl(id, Date.now(), branchId, viewingGitHash), {
+          method: "GET",
+        });
+        if (cancelled || branchAtStart !== branchId || atAtStart !== viewingGitHash) return;
         if (probe.ok) {
           setPdfBust(Date.now());
           return;
         }
         await runCompileRef.current({ auto: true });
       } catch {
-        if (!cancelled && branchAtStart === branchId) {
+        if (!cancelled && branchAtStart === branchId && atAtStart === viewingGitHash) {
           await runCompileRef.current({ auto: true });
         }
       }
@@ -1151,7 +1211,10 @@ export function EditorPage() {
           view.canEdit && (!guestBranchId || view.activeBranchId === guestBranchId),
         );
         setViewingGitHash(view.viewingGitHash ?? null);
-        if (view.headNode) setLastCommit(view.headNode.gitHash.slice(0, 7));
+        if (view.headNode) {
+          setLastCommit(view.headNode.gitHash.slice(0, 7));
+          setTipGitHash(view.headNode.gitHash);
+        }
       } catch {
         /* timeline optional until first open */
       }
@@ -1277,11 +1340,148 @@ export function EditorPage() {
       setDiffOn(true);
       setDiffSince(node.gitHash);
       setDiffBaselineLabel(label);
-      if (id) persistDiffHighlight(id, true, node.gitHash, label);
+      if (id) persistDiffHighlight(id, true, node.gitHash, label, trackChangesPreviewOn);
       showSyncToast(`Comparing to ${node.gitHash.slice(0, 7)}`);
     },
-    [id, showSyncToast],
+    [id, showSyncToast, trackChangesPreviewOn],
   );
+
+  const runTrackChangesPdf = useCallback(
+    async (fromHash: string, opts?: { download?: boolean }) => {
+      if (!id) return;
+      const toHash = viewingGitHash || tipGitHash;
+      if (!toHash) {
+        const msg = "Commit on the timeline first";
+        if (opts?.download) setError(msg);
+        else setTrackChangesPreviewError(msg);
+        return;
+      }
+      if (!canCompile) {
+        const msg = "Track-changes PDF needs compile permission";
+        if (opts?.download) setError(msg);
+        else setTrackChangesPreviewError(msg);
+        return;
+      }
+      if (opts?.download && !canDownload) {
+        setError("Track-changes PDF needs compile and download permission");
+        return;
+      }
+      if (fromHash === toHash) {
+        const msg = "Pick a different baseline — this checkpoint is the compare target";
+        if (opts?.download) setError(msg);
+        else setTrackChangesPreviewError(msg);
+        return;
+      }
+
+      if (trackChangesPreviewOn) {
+        trackChangesPreviewReqRef.current = `${id}:${fromHash}:${toHash}`;
+      }
+
+      setError(null);
+      if (!opts?.download) setTrackChangesPreviewError(null);
+      trackChangesBusyCount.current += 1;
+      setTrackChangesBusy(true);
+      if (opts?.download) {
+        setLog("");
+        setLogOpen(true);
+        setLog(
+          `[openleaf] Building track-changes PDF ${fromHash.slice(0, 7)} → ${toHash.slice(0, 7)}…\n`,
+        );
+      } else {
+        setLog((prev) =>
+          prev
+            ? `${prev}\n[openleaf] Building track-changes PDF ${fromHash.slice(0, 7)} → ${toHash.slice(0, 7)}…\n`
+            : `[openleaf] Building track-changes PDF ${fromHash.slice(0, 7)} → ${toHash.slice(0, 7)}…\n`,
+        );
+      }
+      try {
+        const result = await generateTrackChanges(id, fromHash, toHash, {
+          onLog: (chunk) => setLog((prev) => prev + chunk),
+        });
+        setLog((prev) => prev || result.log);
+        if (!result.ok) {
+          const msg = "Track-changes PDF did not compile. See the log.";
+          setError(msg);
+          if (!opts?.download) {
+            setTrackChangesPreviewPair(null);
+            setTrackChangesPreviewError(msg);
+            setLogOpen(true);
+          }
+          return;
+        }
+        if (trackChangesPreviewOn || !opts?.download) {
+          setTrackChangesPreviewPair({ from: result.from.hash, to: result.to.hash });
+          setTrackChangesPreviewBust(Date.now());
+          setTrackChangesPreviewError(null);
+        }
+        if (opts?.download) {
+          showSyncToast(
+            result.cached
+              ? `Downloaded cached ${result.from.shortHash} → ${result.to.shortHash}`
+              : `Track-changes PDF ${result.from.shortHash} → ${result.to.shortHash}`,
+          );
+          const a = document.createElement("a");
+          a.href = trackChangesDownloadUrl(id, result.from.hash, result.to.hash);
+          a.download = `${id}-changes-${result.from.shortHash}-${result.to.shortHash}.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } else {
+          if (!result.cached) setLogOpen(true);
+          showSyncToast(
+            result.cached
+              ? `Showing cached ${result.from.shortHash} → ${result.to.shortHash}`
+              : `Showing track-changes PDF ${result.from.shortHash} → ${result.to.shortHash}`,
+          );
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Track-changes PDF failed";
+        setError(msg);
+        if (!opts?.download) {
+          setTrackChangesPreviewPair(null);
+          setTrackChangesPreviewError(msg);
+          setLogOpen(true);
+        }
+      } finally {
+        trackChangesBusyCount.current = Math.max(0, trackChangesBusyCount.current - 1);
+        if (trackChangesBusyCount.current === 0) setTrackChangesBusy(false);
+      }
+    },
+    [id, viewingGitHash, tipGitHash, canCompile, canDownload, showSyncToast, trackChangesPreviewOn],
+  );
+
+  const beginTrackChangesDownload = useCallback(() => {
+    setToolbarMoreOpen(false);
+    if (!diffSince) {
+      pendingTrackChangesRef.current = true;
+      setComparePickerOpen(true);
+      showSyncToast("Pick a baseline leaf to compare against");
+      return;
+    }
+    void runTrackChangesPdf(diffSince, { download: true });
+  }, [diffSince, runTrackChangesPdf, showSyncToast]);
+
+  useEffect(() => {
+    if (!id || !diffOn || !trackChangesPreviewOn || !canCompile) return;
+    if (!diffSince) return;
+    const toHash = viewingGitHash || tipGitHash;
+    if (!toHash) {
+      setTrackChangesPreviewError("Commit on the timeline first");
+      return;
+    }
+    const reqKey = `${id}:${diffSince}:${toHash}`;
+    if (trackChangesPreviewReqRef.current === reqKey) return;
+    void runTrackChangesPdf(diffSince);
+  }, [
+    id,
+    diffOn,
+    trackChangesPreviewOn,
+    diffSince,
+    viewingGitHash,
+    tipGitHash,
+    canCompile,
+    runTrackChangesPdf,
+  ]);
 
   const onHighlightSinceCommit = useCallback(
     (commit: GitCommitInfo | string) => {
@@ -1291,10 +1491,10 @@ export function EditorPage() {
       setDiffOn(true);
       setDiffSince(hash);
       setDiffBaselineLabel(label);
-      if (id) persistDiffHighlight(id, true, hash, label);
+      if (id) persistDiffHighlight(id, true, hash, label, trackChangesPreviewOn);
       showSyncToast(`Comparing to ${hash.slice(0, 7)}`);
     },
-    [id, showSyncToast],
+    [id, showSyncToast, trackChangesPreviewOn],
   );
 
   const onTimelineChange = useCallback(
@@ -1305,7 +1505,10 @@ export function EditorPage() {
         view.canEdit && (!guestBranchId || view.activeBranchId === guestBranchId),
       );
       setViewingGitHash(view.viewingGitHash ?? null);
-      if (view.headNode) setLastCommit(view.headNode.gitHash.slice(0, 7));
+      if (view.headNode) {
+        setLastCommit(view.headNode.gitHash.slice(0, 7));
+        setTipGitHash(view.headNode.gitHash);
+      }
       const observing =
         Boolean(guestBranchId) && view.activeBranchId !== guestBranchId;
       showSyncToast(
@@ -1315,11 +1518,18 @@ export function EditorPage() {
             ? `Working on ${view.activeBranch.name}`
             : `Viewing checkpoint ${view.viewingGitHash?.slice(0, 7) ?? ""} (read-only)`,
       );
-      // Force file reload for the new tip / snapshot.
+      // Force file reload for the new tip / snapshot. Clear lastTextPath so the
+      // loader treats this as a real navigation even if the path string is unchanged.
       lastTextPathRef.current = null;
       const path = activePathRef.current;
+      setContent("");
+      setSavedContent("");
+      setYText(null);
+      setFileReady(false);
       setActivePath(null);
-      window.setTimeout(() => setActivePath(path), 0);
+      window.setTimeout(() => {
+        if (path) setActivePath(path);
+      }, 0);
       void refreshTree();
     },
     [showSyncToast, refreshTree, guestBranchId],
@@ -1339,6 +1549,7 @@ export function EditorPage() {
         identityId: collab.identity?.id,
       });
       setLastCommit(result.hash.slice(0, 7));
+      setTipGitHash(result.hash);
       onTimelineChange(result.timeline);
       showSyncToast(`Committed ${result.hash.slice(0, 7)}`);
     } catch (err) {
@@ -1411,7 +1622,7 @@ export function EditorPage() {
             return;
           }
           if (!anchor.file.endsWith(".tex") && !anchor.file.endsWith(".ltx")) return;
-          const hit = await synctexForward(id, anchor.file, anchor.line, col, branchId);
+          const hit = await synctexForward(id, anchor.file, anchor.line, col, branchId, viewingGitHash);
           setPdfHighlight({
             page: hit.page,
             x: hit.x,
@@ -1427,7 +1638,7 @@ export function EditorPage() {
         }
       })();
     },
-    [id, branchId],
+    [id, branchId, viewingGitHash],
   );
 
   const activateReviewHunk = useCallback(
@@ -1514,7 +1725,7 @@ export function EditorPage() {
     async (page: number, x: number, y: number) => {
       if (!id) return;
       try {
-        const hit = await synctexLookup(id, page, x, y, branchId);
+        const hit = await synctexLookup(id, page, x, y, branchId, viewingGitHash);
         const target = normalizeSynctexPath(hit.input);
         if (!target) {
           showSyncToast("Stale SyncTeX paths — hit Recompile");
@@ -1539,14 +1750,14 @@ export function EditorPage() {
         showSyncToast("No SyncTeX match — recompile?");
       }
     },
-    [id, branchId, normalizeSynctexPath, showSyncToast],
+    [id, branchId, viewingGitHash, normalizeSynctexPath, showSyncToast],
   );
 
   const onPdfComment = useCallback(
     async (page: number, x: number, y: number) => {
       if (!id) return;
       try {
-        const hit = await synctexLookup(id, page, x, y, branchId);
+        const hit = await synctexLookup(id, page, x, y, branchId, viewingGitHash);
         const target = normalizeSynctexPath(hit.input);
         if (!target) {
           showSyncToast("Stale SyncTeX paths — hit Recompile");
@@ -1569,7 +1780,7 @@ export function EditorPage() {
         showSyncToast("No SyncTeX match — recompile?");
       }
     },
-    [id, branchId, jumpToAnchor, normalizeSynctexPath, showSyncToast, closeOverlappingChrome],
+    [id, branchId, viewingGitHash, jumpToAnchor, normalizeSynctexPath, showSyncToast, closeOverlappingChrome],
   );
 
   const onRequestComment = useCallback(
@@ -1612,7 +1823,7 @@ export function EditorPage() {
       if (!id || !activePath) return;
       if (!activePath.endsWith(".tex") && !activePath.endsWith(".ltx")) return;
       try {
-        const hit = await synctexForward(id, activePath, line, column, branchId);
+        const hit = await synctexForward(id, activePath, line, column, branchId, viewingGitHash);
         setPdfHighlight({
           page: hit.page,
           x: hit.x,
@@ -1628,7 +1839,7 @@ export function EditorPage() {
         showSyncToast("No SyncTeX match — recompile?");
       }
     },
-    [id, activePath, branchId, showSyncToast],
+    [id, activePath, branchId, viewingGitHash, showSyncToast],
   );
 
   const openPath = useCallback((path: string) => {
@@ -1802,6 +2013,44 @@ export function EditorPage() {
     }
     return <div className="guest-shell guest-loading">Opening project…</div>;
   }
+
+  const markupPreviewActive = Boolean(diffOn && trackChangesPreviewOn && canCompile);
+  const pdfViewerUrl =
+    markupPreviewActive && trackChangesPreviewPair
+      ? trackChangesPdfUrl(
+          id,
+          trackChangesPreviewPair.from,
+          trackChangesPreviewPair.to,
+          trackChangesPreviewBust ?? undefined,
+        )
+      : !markupPreviewActive && pdfBust != null
+        ? pdfUrl(id, pdfBust, branchId, viewingGitHash)
+        : null;
+  const pdfEmptyHint = markupPreviewActive
+    ? trackChangesBusy
+      ? "Building latexdiff track-changes PDF of the compare baseline vs this checkpoint…"
+      : trackChangesPreviewError
+        ? trackChangesPreviewError
+        : !diffSince
+          ? "Pick a compare baseline to build the track-changes PDF."
+          : !(viewingGitHash || tipGitHash)
+            ? "Commit on the timeline first to build a track-changes PDF."
+            : "Preparing track-changes PDF…"
+    : viewingGitHash
+      ? status === "compiling"
+        ? `Building PDF for checkpoint ${viewingGitHash.slice(0, 7)}…`
+        : status === "err"
+          ? "PDF build failed for this checkpoint — check the log or click Recompile."
+          : canCompile
+            ? `Preparing PDF for checkpoint ${viewingGitHash.slice(0, 7)}…`
+            : "No PDF for this checkpoint yet (compile disabled)."
+      : status === "compiling"
+        ? `Building PDF for “${branchLabel}”…`
+        : status === "err"
+          ? "PDF build failed — check the log or click Recompile."
+          : canCompile
+            ? `Preparing PDF for “${branchLabel}”…`
+            : "No PDF on this link yet (compile disabled).";
 
   return (
     <div className={`editor-page${narrow ? " is-narrow" : ""}`}>
@@ -2021,13 +2270,17 @@ export function EditorPage() {
                       : "Save"}
             </button>
           )}
-          {readOnly && canCompile && (
+          {(readOnly || Boolean(viewingGitHash)) && canCompile && (
             <button
               type="button"
               className="btn btn-primary"
               onClick={() => void runCompile()}
               disabled={status === "compiling"}
-              title="Recompile the current project"
+              title={
+                viewingGitHash
+                  ? `Recompile checkpoint ${viewingGitHash.slice(0, 7)}`
+                  : "Recompile the current project"
+              }
             >
               {status === "compiling" ? "Compiling…" : "Recompile"}
             </button>
@@ -2220,7 +2473,7 @@ export function EditorPage() {
                     <div className="toolbar-menu-sep" />
                     <a
                       role="menuitem"
-                      href={downloadUrl(id, "pdf", branchId)}
+                      href={downloadUrl(id, "pdf", branchId, viewingGitHash)}
                       download={`${id}.pdf`}
                       onClick={() => setToolbarMoreOpen(false)}
                     >
@@ -2234,6 +2487,17 @@ export function EditorPage() {
                     >
                       <span>Download ZIP</span>
                     </a>
+                    {canCompile && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={trackChangesBusy}
+                        title="Compare-documents PDF of the compare baseline vs this checkpoint. Uncommitted edits are not included."
+                        onClick={() => beginTrackChangesDownload()}
+                      >
+                        {trackChangesBusy ? "Building track-changes PDF…" : "Download track-changes PDF"}
+                      </button>
+                    )}
                   </>
                 )}
               </div>,
@@ -2545,22 +2809,12 @@ export function EditorPage() {
               }
               right={
                 <PdfViewer
-                  url={pdfBust != null ? pdfUrl(id, pdfBust, branchId) : null}
-                  emptyHint={
-                    viewingGitHash
-                      ? "Historical leaf — PDF preview is for the live tip."
-                      : status === "compiling"
-                        ? `Building PDF for “${branchLabel}”…`
-                        : status === "err"
-                          ? "PDF build failed — check the log or click Recompile."
-                          : canCompile
-                            ? `Preparing PDF for “${branchLabel}”…`
-                            : "No PDF on this link yet (compile disabled)."
-                  }
+                  url={pdfViewerUrl}
+                  emptyHint={pdfEmptyHint}
                   onReverseSearch={onReverseSearch}
                   onCommentAt={(page, x, y) => void onPdfComment(page, x, y)}
                   highlight={pdfHighlight}
-                  overlays={diffOn ? diffBoxes : undefined}
+                  overlays={diffOn && !trackChangesPreviewOn ? diffBoxes : undefined}
                   diffHighlight={
                     config?.git?.enabled === false
                       ? null
@@ -2572,10 +2826,16 @@ export function EditorPage() {
                           fileCount: diffFiles,
                           additions: diffAdditions,
                           deletions: diffDeletions,
-                          loading: diffLoading,
-                          warning: diffWarning,
+                          loading: diffLoading || (markupPreviewActive && trackChangesBusy),
+                          warning: trackChangesPreviewError ?? diffWarning,
                           onEnabledChange: onDiffEnabledChange,
                           onPickBaseline: () => setComparePickerOpen(true),
+                          markupPdf: {
+                            enabled: trackChangesPreviewOn,
+                            available: canCompile,
+                            loading: trackChangesBusy && trackChangesPreviewOn,
+                            onEnabledChange: onTrackChangesPreviewChange,
+                          },
                         }
                   }
                 />
@@ -2623,8 +2883,17 @@ export function EditorPage() {
         projectId={id}
         open={comparePickerOpen}
         selectedHash={diffSince || null}
-        onClose={() => setComparePickerOpen(false)}
-        onPick={onPickCompareBaseline}
+        onClose={() => {
+          pendingTrackChangesRef.current = false;
+          setComparePickerOpen(false);
+        }}
+        onPick={(node, branch) => {
+          onPickCompareBaseline(node, branch);
+          if (pendingTrackChangesRef.current) {
+            pendingTrackChangesRef.current = false;
+            void runTrackChangesPdf(node.gitHash, { download: true });
+          }
+        }}
       />
     </div>
   );

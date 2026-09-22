@@ -907,7 +907,10 @@ projectsRouter.post("/:id/fs/rename", async (req, res) => {
 projectsRouter.post("/:id/compile", async (req, res) => {
   const id = req.params.id;
   const stream = req.query.stream === "1" || req.headers.accept?.includes("text/event-stream");
-  const branchId = await resolveBranchIdWithActive(req, id, { mutate: true }).catch(() => "main");
+  const at = typeof req.query.at === "string" ? req.query.at.trim() : undefined;
+  const branchId = at
+    ? undefined
+    : await resolveBranchIdWithActive(req, id, { mutate: true }).catch(() => "main");
 
   if (stream) {
     res.setHeader("Content-Type", "text/event-stream");
@@ -929,7 +932,7 @@ data: ${JSON.stringify(data)}
         (chunk) => {
           send("log", { chunk });
         },
-        { branchId },
+        { branchId, at },
       );
       send("done", result);
     } catch (err) {
@@ -940,7 +943,55 @@ data: ${JSON.stringify(data)}
   }
 
   try {
-    const result = await compileProject(id, undefined, { branchId });
+    const result = await compileProject(id, undefined, { branchId, at });
+    res.status(result.ok ? 200 : 422).json(result);
+  } catch (err) {
+    res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
+  }
+});
+
+projectsRouter.post("/:id/track-changes", async (req, res) => {
+  const id = req.params.id;
+  const stream = req.query.stream === "1" || req.headers.accept?.includes("text/event-stream");
+  const schema = z.object({
+    from: z.string().min(7).max(40).regex(/^[0-9a-f]+$/i),
+    to: z.string().min(7).max(40).regex(/^[0-9a-f]+$/i),
+  });
+
+  const run = async (onChunk?: (chunk: string) => void) => {
+    const body = schema.parse(req.body ?? {});
+    const { generateTrackChanges } = await import("../services/trackChanges.js");
+    return generateTrackChanges(id, body.from, body.to, onChunk);
+  };
+
+  if (stream) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const send = (event: string, data: unknown) => {
+      res.write(`event: ${event}
+data: ${JSON.stringify(data)}
+
+`);
+    };
+
+    try {
+      send("status", { state: "running" });
+      const result = await run((chunk) => {
+        send("log", { chunk });
+      });
+      send("done", result);
+    } catch (err) {
+      send("error", { error: publicErrorMessage(err, "Track-changes PDF failed") });
+    }
+    res.end();
+    return;
+  }
+
+  try {
+    const result = await run();
     res.status(result.ok ? 200 : 422).json(result);
   } catch (err) {
     res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
@@ -949,9 +1000,49 @@ data: ${JSON.stringify(data)}
 
 projectsRouter.get("/:id/pdf", async (req, res) => {
   try {
-    const cfg = await readProjectConfig(req.params.id);
-    const branchId = await resolveBranchIdWithActive(req, req.params.id);
-    const root = await branchRoot(req.params.id, branchId);
+    const mode = typeof req.query.mode === "string" ? req.query.mode.trim() : "";
+    if (mode === "track-changes") {
+      const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+      const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+      if (!from || !to) {
+        res.status(400).json({ error: "from and to commit hashes are required" });
+        return;
+      }
+      const { findCachedTrackChangesPdf } = await import("../services/trackChanges.js");
+      const cached = await findCachedTrackChangesPdf(req.params.id, from, to);
+      if (!cached) {
+        res.status(404).json({ error: "Track-changes PDF not generated yet" });
+        return;
+      }
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Cache-Control", "no-store");
+      fs.createReadStream(cached.pdf).pipe(res);
+      return;
+    }
+
+    const at = typeof req.query.at === "string" ? req.query.at.trim() : undefined;
+    let root: string;
+    let cfg = await readProjectConfig(req.params.id);
+    if (at) {
+      const { snapshotRootIfPresent } = await import("../services/timeline.js");
+      const snap = snapshotRootIfPresent(req.params.id, at);
+      if (!snap) {
+        res.status(404).json({ error: "PDF not found. Compile the project first." });
+        return;
+      }
+      root = snap;
+      try {
+        const raw = JSON.parse(fs.readFileSync(path.join(root, "openleaf.json"), "utf8")) as {
+          mainFile?: string;
+        };
+        if (raw.mainFile) cfg = { ...cfg, mainFile: raw.mainFile };
+      } catch {
+        /* keep tip config */
+      }
+    } else {
+      const branchId = await resolveBranchIdWithActive(req, req.params.id);
+      root = await branchRoot(req.params.id, branchId);
+    }
     const pdf = pdfPathAbs(req.params.id, cfg.mainFile, root);
     if (!fs.existsSync(pdf)) {
       res.status(404).json({ error: "PDF not found. Compile the project first." });
@@ -967,8 +1058,20 @@ projectsRouter.get("/:id/pdf", async (req, res) => {
 
 projectsRouter.get("/:id/synctex", async (req, res) => {
   try {
-    const branchId = await resolveBranchIdWithActive(req, req.params.id);
-    const root = await branchRoot(req.params.id, branchId);
+    const at = typeof req.query.at === "string" ? req.query.at.trim() : undefined;
+    let root: string;
+    if (at) {
+      const { snapshotRootIfPresent } = await import("../services/timeline.js");
+      const snap = snapshotRootIfPresent(req.params.id, at);
+      if (!snap) {
+        res.status(404).json({ error: "No SyncTeX hit" });
+        return;
+      }
+      root = snap;
+    } else {
+      const branchId = await resolveBranchIdWithActive(req, req.params.id);
+      root = await branchRoot(req.params.id, branchId);
+    }
     const direction = String(req.query.direction ?? "reverse");
     if (direction === "forward") {
       const schema = z.object({
@@ -1007,9 +1110,29 @@ projectsRouter.get("/:id/download", async (req, res) => {
   const format = String(req.query.format ?? "zip");
   try {
     if (format === "pdf") {
-      const cfg = await readProjectConfig(req.params.id);
-      const branchId = await resolveBranchIdWithActive(req, req.params.id);
-      const root = await branchRoot(req.params.id, branchId);
+      const at = typeof req.query.at === "string" ? req.query.at.trim() : undefined;
+      let cfg = await readProjectConfig(req.params.id);
+      let root: string;
+      if (at) {
+        const { snapshotRootIfPresent } = await import("../services/timeline.js");
+        const snap = snapshotRootIfPresent(req.params.id, at);
+        if (!snap) {
+          res.status(404).json({ error: "PDF not found" });
+          return;
+        }
+        root = snap;
+        try {
+          const raw = JSON.parse(fs.readFileSync(path.join(root, "openleaf.json"), "utf8")) as {
+            mainFile?: string;
+          };
+          if (raw.mainFile) cfg = { ...cfg, mainFile: raw.mainFile };
+        } catch {
+          /* keep tip config */
+        }
+      } else {
+        const branchId = await resolveBranchIdWithActive(req, req.params.id);
+        root = await branchRoot(req.params.id, branchId);
+      }
       const pdf = pdfPathAbs(req.params.id, cfg.mainFile, root);
       if (!fs.existsSync(pdf)) {
         res.status(404).json({ error: "PDF not found" });
@@ -1023,11 +1146,32 @@ projectsRouter.get("/:id/download", async (req, res) => {
       fs.createReadStream(pdf).pipe(res);
       return;
     }
+    if (format === "track-changes") {
+      const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+      const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+      if (!from || !to) {
+        res.status(400).json({ error: "from and to commit hashes are required" });
+        return;
+      }
+      const { findCachedTrackChangesPdf } = await import("../services/trackChanges.js");
+      const cached = await findCachedTrackChangesPdf(req.params.id, from, to);
+      if (!cached) {
+        res.status(404).json({ error: "Track-changes PDF not generated yet" });
+        return;
+      }
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${req.params.id}-changes-${cached.from.shortHash}-${cached.to.shortHash}.pdf"`,
+      );
+      fs.createReadStream(cached.pdf).pipe(res);
+      return;
+    }
     if (format === "zip") {
       streamProjectZip(req.params.id, res);
       return;
     }
-    res.status(400).json({ error: "format must be pdf or zip" });
+    res.status(400).json({ error: "format must be pdf, zip, or track-changes" });
   } catch (err) {
     res.status(statusOf(err)).json({ error: publicErrorMessage(err) });
   }
