@@ -314,7 +314,8 @@ async function syncImportedGitBranches(
       // Fully merged (or git could not list unique commits). Keep an existing
       // thread as-is so a live worktree remains explorable; otherwise add a
       // single node at the branch tip.
-      if (branch && next.nodes.some((n) => n.branchId === branch.id)) continue;
+      const keepId = branch?.id;
+      if (keepId && next.nodes.some((n) => n.branchId === keepId)) continue;
       const tip = (await listProjectCommits(projectId, 1, gb.name))[0];
       if (!tip) continue;
       unique = [tip];
