@@ -6,25 +6,43 @@ import react from "@vitejs/plugin-react";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-function configuredAccess(): string {
-  const fromEnv = process.env.OPENLEAF_ACCESS?.trim();
-  if (fromEnv) return fromEnv;
+type FileConfig = {
+  access?: string;
+  port?: number;
+  client?: { devPort?: number };
+};
+
+/** default.json, then local.json. Env vars applied by the caller still win. */
+function readConfigFiles(): FileConfig {
   const configDir = process.env.OPENLEAF_CONFIG_DIR?.trim() || path.resolve(here, "../config");
-  for (const name of ["local.json", "default.json"]) {
+  const merged: FileConfig = {};
+  for (const name of ["default.json", "local.json"]) {
     try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(configDir, name), "utf8")) as { access?: string };
-      if (parsed.access) return parsed.access;
+      const parsed = JSON.parse(fs.readFileSync(path.join(configDir, name), "utf8")) as FileConfig;
+      if (parsed.access) merged.access = parsed.access;
+      if (typeof parsed.port === "number" && parsed.port > 0) merged.port = parsed.port;
+      if (typeof parsed.client?.devPort === "number" && parsed.client.devPort > 0) {
+        merged.client = { devPort: parsed.client.devPort };
+      }
     } catch {
-      /* try the next file */
+      /* missing or invalid — keep what we have */
     }
   }
-  return "localhost";
+  return merged;
 }
 
-const access = configuredAccess();
+function positivePort(fromEnv: string | undefined, fromFile: number | undefined, fallback: number): number {
+  const envPort = Number(fromEnv);
+  if (Number.isFinite(envPort) && envPort > 0) return envPort;
+  if (fromFile && fromFile > 0) return fromFile;
+  return fallback;
+}
+
+const fileConfig = readConfigFiles();
+const access = process.env.OPENLEAF_ACCESS?.trim() || fileConfig.access || "localhost";
 const expose = access === "lan" || access === "remote";
-const port = Number(process.env.OPENLEAF_CLIENT_PORT || 5173);
-const apiPort = Number(process.env.OPENLEAF_PORT || 8787);
+const port = positivePort(process.env.OPENLEAF_CLIENT_PORT, fileConfig.client?.devPort, 5173);
+const apiPort = positivePort(process.env.OPENLEAF_PORT, fileConfig.port, 8787);
 const apiTarget = `http://127.0.0.1:${apiPort}`;
 
 function apiProxy(ws = false) {
