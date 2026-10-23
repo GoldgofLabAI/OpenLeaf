@@ -2297,6 +2297,18 @@ export function EditorPage() {
             ? `Preparing PDF for “${branchLabel}”…`
             : "No PDF on this link yet (compile disabled).";
 
+  // Right-docked drawers overlay the preview — ask PdfViewer to re-center into the gap.
+  const pdfReflowForDrawer =
+    !narrow &&
+    (commentsOpen ||
+      historyOpen ||
+      shareOpen ||
+      aiReviewOpen ||
+      aiLinksOpen ||
+      libraryOpen ||
+      comparePickerOpen ||
+      fileAccessOpen);
+
   return (
     <div className={`editor-page${narrow ? " is-narrow" : ""}`}>
       <div className="editor-toolbar">
@@ -3294,6 +3306,7 @@ export function EditorPage() {
                   overlays={diffOn && !trackChangesPreviewOn ? diffBoxes : undefined}
                   projectId={id}
                   staleBanner={stalePdf ? "Showing the last successful PDF" : null}
+                  reflowForDrawer={pdfReflowForDrawer}
                   diffHighlight={
                     config?.git?.enabled === false
                       ? null

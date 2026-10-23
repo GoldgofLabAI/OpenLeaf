@@ -148,6 +148,11 @@ type Props = {
   staleBanner?: string | null;
   /** Root-level document being previewed when it is not the saved main file. */
   sourceLabel?: string | null;
+  /**
+   * When a right-side drawer (comments, history, …) is open, remeasure and pad
+   * the scroll area so pages center in the remaining visible strip.
+   */
+  reflowForDrawer?: boolean;
 };
 
 type ScrollAnchor = {
@@ -239,6 +244,42 @@ function fitWidthScale(pageWidth: number, scroller: HTMLElement | null): number 
   return clampScale(available / pageWidth);
 }
 
+/** Right-docked drawers that overlay the preview (fixed; not bottom sheets). */
+const RIGHT_DRAWER_SELECTOR = [
+  ".comments-drawer",
+  ".history-drawer",
+  ".library-drawer",
+  ".share-drawer",
+  ".ai-review-drawer",
+  ".ai-link-drawer",
+  ".timeline-drawer",
+  ".file-access-drawer",
+].join(", ");
+
+/**
+ * How many CSS pixels of the PDF scroller are covered by a right-side drawer.
+ * Used to pad `.pdf-scroll` so pages stay centered in the still-visible region.
+ */
+function measureRightDrawerInset(scroller: HTMLElement): number {
+  const pdf = scroller.getBoundingClientRect();
+  if (pdf.width < 40) return 0;
+  let inset = 0;
+  for (const el of document.querySelectorAll<HTMLElement>(RIGHT_DRAWER_SELECTOR)) {
+    if (el.classList.contains("is-sheet")) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 40) continue;
+    // Bottom sheets: short, pinned to the viewport bottom.
+    if (r.height < pdf.height * 0.55 && r.bottom >= window.innerHeight - 8) continue;
+    if (r.left >= pdf.right - 1 || r.right <= pdf.left + 1) continue;
+    const fromRight = pdf.right - r.left;
+    if (fromRight <= 0) continue;
+    // Fully (or nearly) covered — nothing useful to re-center into.
+    if (fromRight >= pdf.width * 0.88) continue;
+    inset = Math.max(inset, fromRight);
+  }
+  return Math.round(inset);
+}
+
 function captureScrollAnchor(scroller: HTMLElement, container: HTMLElement): ScrollAnchor | null {
   const wraps = [...container.querySelectorAll(".pdf-page-wrap")] as HTMLElement[];
   if (wraps.length === 0) return null;
@@ -306,6 +347,7 @@ export function PdfViewer({
   projectId,
   staleBanner,
   sourceLabel,
+  reflowForDrawer = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -340,9 +382,45 @@ export function PdfViewer({
   /** Bumps when the loaded document identity changes so pages re-render. */
   const [docVersion, setDocVersion] = useState(0);
   const [pagesReady, setPagesReady] = useState(false);
+  /** Extra right padding so pages center beside an overlay drawer. */
+  const [endInset, setEndInset] = useState(0);
   const pixelRatio = useDevicePixelRatio();
 
   scaleRef.current = scale;
+
+  // Pad the scrollport when a fixed right drawer covers part of the preview.
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || fullscreen || !reflowForDrawer) {
+      setEndInset(0);
+      return;
+    }
+    let frame: number | null = null;
+    const apply = () => {
+      frame = null;
+      const next = measureRightDrawerInset(scroller);
+      setEndInset((prev) => (prev === next ? prev : next));
+    };
+    const schedule = () => {
+      if (frame != null) return;
+      frame = window.requestAnimationFrame(apply);
+    };
+    apply();
+    // Drawer slide-in is ~160ms — remeasure once it settles.
+    const settled = window.setTimeout(apply, 180);
+    const resizeObserver = new ResizeObserver(schedule);
+    resizeObserver.observe(scroller);
+    for (const drawer of document.querySelectorAll(RIGHT_DRAWER_SELECTOR)) {
+      resizeObserver.observe(drawer);
+    }
+    window.addEventListener("resize", schedule);
+    return () => {
+      window.clearTimeout(settled);
+      if (frame != null) window.cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [reflowForDrawer, fullscreen]);
 
   useEffect(() => {
     fittedRef.current = false;
@@ -1211,7 +1289,16 @@ export function PdfViewer({
           {error}
         </div>
       )}
-      <div className="pdf-scroll" ref={scrollRef}>
+      <div
+        className="pdf-scroll"
+        ref={scrollRef}
+        style={
+          endInset > 0
+            ? // Keep the usual 1rem gutter on the visible side of the drawer edge.
+              { paddingRight: `calc(${endInset}px + 1rem)` }
+            : undefined
+        }
+      >
         <div ref={containerRef} />
       </div>
     </div>
