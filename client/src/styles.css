@@ -2704,9 +2704,18 @@ button.lib-badge:hover {
 
 .comments-filter {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 0.25rem;
   padding: 0.4rem 0.85rem;
   border-bottom: 1px solid var(--line);
+}
+
+.comments-filter-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 0.15rem 0.35rem;
+  background: var(--line);
 }
 
 .comments-filter-active {

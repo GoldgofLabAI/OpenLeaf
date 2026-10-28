@@ -60,6 +60,33 @@ function anchorLabel(a: CommentAnchor): string {
   return base;
 }
 
+type CommentSort = "document" | "recent";
+
+/** Reading order: PDF page/y when both have PDF coords, else source file then line. */
+function compareDocumentOrder(a: CommentThread, b: CommentThread): number {
+  const aa = a.anchor;
+  const ba = b.anchor;
+  if (isPdfAnchor(aa) && isPdfAnchor(ba)) {
+    const page = (aa.pdfPage ?? 0) - (ba.pdfPage ?? 0);
+    if (page !== 0) return page;
+    const y = (aa.pdfY ?? 0) - (ba.pdfY ?? 0);
+    if (y !== 0) return y;
+    const x = (aa.pdfX ?? 0) - (ba.pdfX ?? 0);
+    if (x !== 0) return x;
+  }
+  const file = aa.file.localeCompare(ba.file);
+  if (file !== 0) return file;
+  const line = aa.line - ba.line;
+  if (line !== 0) return line;
+  const col = (aa.column ?? 0) - (ba.column ?? 0);
+  if (col !== 0) return col;
+  return a.createdAt.localeCompare(b.createdAt);
+}
+
+function compareRecentOrder(a: CommentThread, b: CommentThread): number {
+  return a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0;
+}
+
 function AuthorRow({
   name,
   color,
@@ -111,6 +138,7 @@ export function CommentsPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"open" | "all">("open");
+  const [sort, setSort] = useState<CommentSort>("document");
   const [composeBody, setComposeBody] = useState("");
   const [composeAnchor, setComposeAnchor] = useState<CommentAnchor | null>(null);
   const [busy, setBusy] = useState(false);
@@ -150,8 +178,9 @@ export function CommentsPanel({
 
   const visible = useMemo(() => {
     const list = filter === "open" ? threads.filter((t) => !t.resolved) : threads;
-    return [...list].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
-  }, [threads, filter]);
+    const cmp = sort === "document" ? compareDocumentOrder : compareRecentOrder;
+    return [...list].sort(cmp);
+  }, [threads, filter, sort]);
 
   const openCount = threads.filter((t) => !t.resolved).length;
 
@@ -274,6 +303,23 @@ export function CommentsPanel({
           onClick={() => setFilter("all")}
         >
           All
+        </button>
+        <span className="comments-filter-sep" aria-hidden />
+        <button
+          type="button"
+          className={`btn btn-ghost${sort === "document" ? " comments-filter-active" : ""}`}
+          onClick={() => setSort("document")}
+          title="Order by position in the manuscript (file/line, or PDF page)"
+        >
+          Document
+        </button>
+        <button
+          type="button"
+          className={`btn btn-ghost${sort === "recent" ? " comments-filter-active" : ""}`}
+          onClick={() => setSort("recent")}
+          title="Newest activity first"
+        >
+          Recent
         </button>
       </div>
 
