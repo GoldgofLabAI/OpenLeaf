@@ -2791,8 +2791,10 @@ button.lib-badge:hover {
 
 .comments-item-jump {
   display: flex;
-  gap: 0.55rem;
+  flex-direction: column;
+  gap: 0.35rem;
   width: 100%;
+  min-width: 0;
   text-align: left;
   border: 0;
   background: transparent;
@@ -2839,13 +2841,16 @@ button.lib-badge:hover {
   font-size: 0.85rem;
   color: var(--ink);
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .comments-quote {
   font-size: 0.75rem;
   color: var(--ink-muted);
   font-style: italic;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .comments-meta {
