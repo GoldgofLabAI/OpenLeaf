@@ -2704,9 +2704,18 @@ button.lib-badge:hover {
 
 .comments-filter {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 0.25rem;
   padding: 0.4rem 0.85rem;
   border-bottom: 1px solid var(--line);
+}
+
+.comments-filter-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 0.15rem 0.35rem;
+  background: var(--line);
 }
 
 .comments-filter-active {
@@ -2791,8 +2800,10 @@ button.lib-badge:hover {
 
 .comments-item-jump {
   display: flex;
-  gap: 0.55rem;
+  flex-direction: column;
+  gap: 0.35rem;
   width: 100%;
+  min-width: 0;
   text-align: left;
   border: 0;
   background: transparent;
@@ -2839,13 +2850,16 @@ button.lib-badge:hover {
   font-size: 0.85rem;
   color: var(--ink);
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .comments-quote {
   font-size: 0.75rem;
   color: var(--ink-muted);
   font-style: italic;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .comments-meta {
